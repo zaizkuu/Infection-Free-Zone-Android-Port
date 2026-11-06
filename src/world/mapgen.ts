@@ -1118,8 +1118,9 @@ export function rollSurvivors(kind: BuildingKind, rng: Rng): number {
  */
 export function vehicleSpots(map: MapData): number[] {
   const hq = map.buildings[map.hqId];
-  const hx = hq.x + hq.w / 2;
-  const hy = hq.y + hq.h / 2;
+  // real maps measure from the map centre, so choosing a different haven doesn't move the cars
+  const hx = map.vehicleRef ? map.vehicleRef.x : hq.x + hq.w / 2;
+  const hy = map.vehicleRef ? map.vehicleRef.y : hq.y + hq.h / 2;
   const out: number[] = [];
   const far = (i: number) => out.every((j) => Math.hypot(map.props[i].x - map.props[j].x, map.props[i].y - map.props[j].y) > 160);
   const pick = (pred: (p: Prop) => boolean, n: number) => {

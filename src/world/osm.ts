@@ -1,8 +1,8 @@
 import { Rng } from '../core/rng';
 import { hash2 } from '../core/rng';
 import { clamp, type Rect, type Vec } from '../core/math';
-import { CAPACITY, CAR_COLORS, FLAT_ROOFS, HOUSE_ROOFS, HOUSE_WALLS, SHOP_WALLS, defaultName, rollInfected, rollLoot, rollSurvivors } from './mapgen';
-import { assembleRings, centroid, clipPolyRect, closestOnPoly, closestOnSeg, mainAxis, pointInPoly, polyArea, polyBounds, simplify, simplifyRing } from './geo';
+import { CAR_COLORS, FLAT_ROOFS, HOUSE_ROOFS, HOUSE_WALLS, SHOP_WALLS, defaultName, rollInfected, rollLoot, rollSurvivors } from './mapgen';
+import { assembleRings, centroid, clipPolyRect, closestOnPoly, closestOnSeg, mainAxis, pointInPoly, polyArea, polyBounds, scanRings, seaPolygons, simplify, simplifyRing } from './geo';
 import type { Area, AreaKind, BuildingDef, BuildingKind, Facing, MapData, Prop, WaterBody, Way } from './types';
 
 /**
@@ -126,6 +126,40 @@ export async function searchPlaces(q: string): Promise<Place[]> {
   });
 }
 
+/** Smallest footprint (world units², 2 units per metre) that can shelter the starting group. */
+const HAVEN_MIN_AREA = 280;
+export const HAVEN_MIN_BEDS = 8;
+
+/** Wall strength once the group has moved in and shored the place up. */
+export function havenHp(b: BuildingDef): number {
+  return Math.max(b.baseHp, 480) + 120;
+}
+
+/** How many infected roam a real town at the start: about Millbrook's density. */
+export function realInfected(map: MapData): number {
+  return Math.round(150 + Math.min(50, map.buildings.length / 30));
+}
+
+export function footprintArea(b: BuildingDef): number {
+  return b.poly ? Math.abs(polyArea(b.poly)) : b.w * (b.h - b.wallH);
+}
+
+export function canBeHaven(b: BuildingDef): boolean {
+  return footprintArea(b) >= HAVEN_MIN_AREA;
+}
+
+/** Turns the chosen building into the haven HQ: cleared out, with room for the whole group. */
+export function makeHaven(map: MapData, id: number): void {
+  const b = map.buildings[id];
+  map.hqId = id;
+  b.infected = 0;
+  b.survivors = 0;
+  b.loot = { food: 0, mat: 0, ammo: 0, med: 0, guns: 0, fuel: 0 };
+  b.capacity = Math.max(b.capacity, HAVEN_MIN_BEDS);
+  b.baseHp = havenHp(b);
+  if (b.kind !== 'firestation' && !b.name.endsWith('(Haven)')) b.name = `${b.name} (Haven)`;
+}
+
 /** A short name for a coordinate (used for "Use my location"). */
 export async function reverseName(lat: number, lon: number): Promise<string> {
   const url = `https://nominatim.openstreetmap.org/reverse?format=jsonv2&zoom=14&lat=${lat.toFixed(5)}&lon=${lon.toFixed(5)}`;
@@ -196,6 +230,7 @@ export function buildRealMap(data: OsmData, place: Place): MapData {
   const landuse: { poly: Vec[]; v: number }[] = [];
   const forests: Vec[][] = [];
   const parks: Vec[][] = [];
+  const coast: Vec[][] = [];
 
   const addArea = (kind: AreaKind, poly: Vec[], v = 0.5, o?: number) => {
     if (poly.length < 3) return;
@@ -250,6 +285,10 @@ export function buildRealMap(data: OsmData, place: Place): MapData {
       continue;
     }
     // water
+    if (t.natural === 'coastline' && e.type === 'way') {
+      coast.push(geom(e.geometry));
+      continue;
+    }
     const isWaterPoly = t.natural === 'water' || t.waterway === 'riverbank' || t.landuse === 'reservoir' || t.landuse === 'basin' || t.waterway === 'dock';
     if (isWaterPoly) {
       for (const p of polysOf(e)) {
@@ -324,6 +363,15 @@ export function buildRealMap(data: OsmData, place: Place): MapData {
     }
   }
 
+  // ---- the sea, closed off from the coastlines
+  for (const s of seaPolygons(coast, W)) {
+    const poly = simplifyRing(s.poly, 1.2);
+    const holes = s.holes.map((h) => simplifyRing(h, 1.2)).filter((h) => h.length >= 3);
+    if (poly.length >= 3 && Math.abs(polyArea(poly)) > 400) water.unshift({ poly, holes, sea: true });
+  }
+  const inWater = (x: number, y: number) =>
+    water.some((wb) => wb.poly && pointInPoly(wb.poly, x, y) && !(wb.holes ?? []).some((h) => pointInPoly(h, x, y)));
+
   // ---- occupancy raster (buildings, roads, water) for placing trees & cars
   const OC = 8;
   const ow = Math.ceil(W / OC);
@@ -351,7 +399,13 @@ export function buildRealMap(data: OsmData, place: Place): MapData {
     }
   }
   for (const wb of water) {
-    if (wb.poly) markPoly(wb.poly, 4);
+    if (wb.sea && wb.poly) {
+      scanRings([wb.poly, ...(wb.holes ?? [])], 0, W, OC, (y, x0, x1) => {
+        const cy = Math.floor(y / OC);
+        if (cy < 0 || cy >= ow) return;
+        for (let cx = Math.max(0, Math.floor(x0 / OC)); cx <= Math.min(ow - 1, Math.floor(x1 / OC)); cx++) occ[cy * ow + cx] = 1;
+      });
+    } else if (wb.poly) markPoly(wb.poly, 4);
     if (wb.line) for (const p of wb.line) markDisc(p.x, p.y, (wb.w ?? 4) / 2 + 4);
   }
 
@@ -473,7 +527,8 @@ export function buildRealMap(data: OsmData, place: Place): MapData {
       wallColor: flat ? SHOP_WALLS[Math.floor(h(2) * SHOP_WALLS.length)] : HOUSE_WALLS[Math.floor(h(2) * HOUSE_WALLS.length)],
       door,
       facing,
-      capacity: CAPACITY[kind],
+      // beds follow the real floor space (about one per 80 m²)
+      capacity: Math.round(clamp((rb.area / (REAL_SCALE * REAL_SCALE)) * Math.min(levels, 6) / 80, 2, 14)),
       baseHp: Math.round(260 + rb.area / 12),
       loot: rollLoot(kind, rng),
       infected: rollInfected(kind, rng),
@@ -574,10 +629,6 @@ export function buildRealMap(data: OsmData, place: Place): MapData {
   };
   const hq = pickHq();
   if (!hq) throw new Error('No buildings found here. Try a town or city centre.');
-  hq.infected = 0;
-  hq.survivors = 0;
-  hq.loot = { food: 0, mat: 0, ammo: 0, med: 0, guns: 0, fuel: 0 };
-  if (hq.kind !== 'firestation') hq.name = `${hq.name} (Haven)`;
 
   // ---- horde entry points where roads leave the map
   const entries: Vec[] = [];
@@ -592,11 +643,14 @@ export function buildRealMap(data: OsmData, place: Place): MapData {
       if (entries.every((e) => Math.hypot(e.x - p.x, e.y - p.y) > 260)) entries.push(p);
     }
   }
-  while (entries.length < 6) {
+  for (let tries = 0; entries.length < 6 && tries < 400; tries++) {
     const side = rng.int(0, 3);
     const t = rng.range(150, W - 150);
-    entries.push(side === 0 ? { x: t, y: 12 } : side === 1 ? { x: t, y: W - 12 } : side === 2 ? { x: 12, y: t } : { x: W - 12, y: t });
+    const p = side === 0 ? { x: t, y: 12 } : side === 1 ? { x: t, y: W - 12 } : side === 2 ? { x: 12, y: t } : { x: W - 12, y: t };
+    // the dead don't come out of the sea
+    if (!inWater(p.x, p.y) && entries.every((e) => Math.hypot(e.x - p.x, e.y - p.y) > 200)) entries.push(p);
   }
+  if (!entries.length) entries.push({ x: W / 2, y: 12 });
 
   return {
     seed,
@@ -612,6 +666,7 @@ export function buildRealMap(data: OsmData, place: Place): MapData {
     bridges: [],
     hqId: hq.id,
     center: mid,
+    vehicleRef: mid,
     town: { x: 60, y: 60, w: W - 120, h: W - 120 },
     entries,
     real: { lat: place.lat, lon: place.lon, name: place.name, half: REAL_HALF, scale: REAL_SCALE },

@@ -1401,3 +1401,58 @@ button.pick-card:active {
     grid-template-columns: 1fr;
   }
 }
+
+/* ---- choose your haven (real-world towns) */
+#hud.choosing > .clock,
+#hud.choosing > .res,
+#hud.choosing > .controls,
+#hud.choosing > .squads,
+#hud.choosing > .actions,
+#hud.choosing > .card,
+#hud.choosing > .placebar {
+  display: none;
+}
+.choose-top {
+  position: absolute;
+  left: var(--sl);
+  top: var(--st);
+  max-width: 300px;
+  padding: 10px 12px 10px;
+}
+.choose-title {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  font-family: var(--display);
+  font-weight: 800;
+  font-size: 19px;
+  letter-spacing: 0.03em;
+  text-transform: uppercase;
+}
+.choose-title .ic {
+  color: var(--ember-2);
+}
+.choose-top p {
+  margin: 6px 0 0;
+  font-size: 12.5px;
+  line-height: 1.4;
+  color: var(--muted);
+}
+.choose-card {
+  position: absolute;
+  right: var(--sr);
+  bottom: var(--sb);
+  width: 286px;
+  max-height: calc(100vh - var(--st) - var(--sb));
+  overflow-y: auto;
+  padding: 12px;
+  animation: pop 0.18s ease-out;
+}
+.choose-card .sub-title {
+  margin-top: 8px;
+}
+@media (max-width: 700px) {
+  .choose-top {
+    max-width: calc(100vw - 286px - var(--sl) - var(--sr) - 10px);
+  }
+}

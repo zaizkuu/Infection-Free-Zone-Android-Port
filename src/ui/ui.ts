@@ -26,10 +26,13 @@ import { TUTORIAL, canClaim, canDemolish, demolishInfo, engineerAtHaven, fortCos
 import type { MapData } from '../world/types';
 import type { ViewState } from '../render/worldRenderer';
 import type { Prefs } from '../save';
-import { OSM_ATTRIBUTION, SUGGESTED, type Place } from '../world/osm';
+import { HAVEN_MIN_BEDS, OSM_ATTRIBUTION, SUGGESTED, havenHp, type Place } from '../world/osm';
 
 export interface App {
   st: GameState | null;
+  suggestedHq: number;
+  chooseStart(): void;
+  chooseBack(): void;
   rt: Runtime | null;
   map: MapData;
   view: ViewState;
@@ -123,6 +126,8 @@ export class Ui {
         </div>
         <div class="card panel hidden" data-r="card"></div>
         <div class="placebar panel hidden" data-r="placebar"></div>
+        <div class="choose-top panel hidden" data-r="chooseTop"></div>
+        <div class="choose-card panel hidden" data-r="chooseCard"></div>
         <div class="toasts" data-r="toasts"></div>
         <div class="banner" data-r="banner"></div>
       </div>
@@ -202,6 +207,12 @@ export class Ui {
         break;
       case 'close':
         this.closePanel();
+        break;
+      case 'choose-start':
+        this.app.chooseStart();
+        break;
+      case 'choose-back':
+        this.app.chooseBack();
         break;
       case 'scout':
       case 'scavenge':
@@ -630,6 +641,48 @@ export class Ui {
 
   // ------------------------------------------------------------------ hud updates
 
+  /** Shows or refreshes the "choose your haven" overlay (real-world towns, before Day 1). */
+  setChoosing(on: boolean): void {
+    this.hud.classList.toggle('choosing', on);
+    this.el.chooseTop.classList.toggle('hidden', !on);
+    this.el.chooseCard.classList.toggle('hidden', !on);
+    if (!on) return;
+    this.closePanel();
+    const map = this.app.map;
+    this.el.chooseTop.innerHTML = `<div class="choose-title">${I.haven}Choose your haven</div>
+      <p>Tap any building in ${esc(map.townName)} to make it your base. Big buildings sleep more people, sturdy ones hold out longer, and whatever is stored inside is yours.</p>
+      ${map.real ? `<div class="attrib">Map ${OSM_ATTRIBUTION}</div>` : ''}`;
+    this.el.chooseCard.innerHTML = this.chooseCard();
+  }
+
+  private chooseCard(): string {
+    const st = this.app.st;
+    const map = this.app.map;
+    if (!st) return '';
+    const id = map.hqId;
+    const d = map.buildings[id];
+    const l = st.b[id].loot;
+    const kind = d.kind === 'firestation' ? 'Fire station' : d.kind[0].toUpperCase() + d.kind.slice(1);
+    const tags = [`<span class="tag">${kind}</span>`];
+    if (id === this.app.suggestedHq) tags.push('<span class="tag ember">Suggested</span>');
+    const cx = d.x + d.w / 2;
+    const cy = d.y + d.h / 2;
+    const toEntry = Math.min(...map.entries.map((e) => Math.hypot(e.x - cx, e.y - cy)));
+    if (toEntry < 320) tags.push('<span class="tag bad">Near a road into town</span>');
+    const hp = havenHp(d);
+    const walls = hp >= 900 ? 'Very solid' : hp >= 680 ? 'Solid' : 'Light';
+    const cell = (ic: string, n: number, col: string) => `<div class="${n ? '' : 'zero'}" style="color:${col}">${ic}<span style="color:var(--text)">${n}</span></div>`;
+    const name = d.name.replace(/ \(Haven\)$/, '');
+    return `<div class="card-head"><div><div class="card-title">${esc(name)}</div>${d.sub ? `<div class="card-sub">${esc(d.sub)}</div>` : ''}</div></div>
+      <div class="tags">${tags.join('')}</div>
+      <div class="kv"><span>Beds</span><b>${Math.max(d.capacity, HAVEN_MIN_BEDS)}</b></div>
+      <div class="kv"><span>Walls</span><b>${walls}</b></div>
+      <div class="sub-title">Stored inside</div>
+      <div class="loot six">${cell(I.food, l.food, 'var(--food)')}${cell(I.mat, l.mat, 'var(--mat)')}${cell(I.ammo, l.ammo, 'var(--ammo)')}${cell(I.med, l.med, 'var(--med)')}${cell(I.fuel, l.fuel || 0, 'var(--fuel)')}${cell(I.gun, l.guns, '#b0bec5')}</div>
+      <div class="note">Tap other buildings to compare. The horde comes along the roads at the edge of the map.</div>
+      <div class="btns"><button class="btn" data-act="choose-back">${I.ret}Back</button><button class="btn primary" data-act="choose-start">${I.flame}Start here</button></div>`;
+  }
+
   showHud(on: boolean): void {
     this.hud.classList.toggle('hidden', !on);
   }
@@ -824,7 +877,7 @@ export class Ui {
         <button class="btn" data-act="settings">${I.gear}Settings</button>
       </div>
       ${message ? `<div class="note warn-note">${esc(message)}</div>` : ''}
-      <div class="foot">v0.5 prototype</div>
+      <div class="foot">v0.6 prototype</div>
     </div></div>`;
   }
 
@@ -845,7 +898,7 @@ export class Ui {
         ${tip(I.claim, 'Grow the haven', 'Claim cleared buildings next to your haven for more beds. Rescued survivors move in and stand guard.')}
         ${tip(I.fortify, 'Fortify & build', 'Barricade haven buildings and build watchtowers, fire barrels, gardens, workshops and infirmaries.')}
         ${tip(I.moon, 'Nights are deadly', 'At 20:00 a horde marches on the haven. Light the dark so guards can see, and bring squads home.')}
-        ${tip(I.haven, 'Real-world towns', 'Start a new game on a real place: search for it or use your location. Its streets, buildings and parks come from OpenStreetMap.')}
+        ${tip(I.haven, 'Real-world towns', 'Start a new game on a real place: search for it or use your location. Its streets, buildings, parks and coast come from OpenStreetMap. Then tap any building to make it your haven: big ones sleep more, and whatever is stored inside is yours.')}
         ${tip(I.rain, 'Weather', 'Rain muffles gunfire but cuts visibility. Fog hides the infected until they are close.')}
       </div>
       <div class="row"><button class="btn primary" data-act="back">${I.ret}Back</button></div>

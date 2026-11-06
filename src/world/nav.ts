@@ -1,7 +1,7 @@
 import type { MapData, Prop } from './types';
 import type { Rect, Vec } from '../core/math';
 import { inRiver, vehicleSpots } from './mapgen';
-import { pointInPoly, polyBounds } from './geo';
+import { pointInPoly, polyBounds, scanRings } from './geo';
 
 export const CELL = 10;
 
@@ -100,7 +100,13 @@ export class NavGrid {
     }
     // real-world water (lakes, river areas, streams); bridges are opened again below
     for (const wb of map.water ?? []) {
-      if (wb.poly) this.markPoly(wb.poly, 1, 0);
+      if (wb.sea && wb.poly) {
+        // the sea can be most of the map: fill it row by row, leaving islands (and their buildings) alone
+        scanRings([wb.poly, ...(wb.holes ?? [])], 0, this.h * CELL, CELL, (y, x0, x1) => {
+          const cy = Math.floor(y / CELL);
+          for (let cx = Math.max(0, Math.ceil(x0 / CELL - 0.5)); cx <= Math.min(this.w - 1, Math.floor(x1 / CELL - 0.5)); cx++) this.blocked[cy * this.w + cx] = 1;
+        });
+      } else if (wb.poly) this.markPoly(wb.poly, 1, 0);
       if (wb.line && (wb.w ?? 0) >= 6) this.markLine(wb.line, (wb.w ?? 4) / 2 - 1, 1);
     }
     for (const wy of map.ways ?? []) if (wy.bridge) this.markLine(wy.pts, wy.w / 2 + 1, 0);

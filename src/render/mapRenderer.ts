@@ -1617,6 +1617,31 @@ export class MapRenderer {
 
   // ---------------------------------------------------------------- real-world maps
 
+  /** Outline and islands of a water area. */
+  private waterPath(g: CanvasRenderingContext2D, w: WaterBody): void {
+    polyPath(g, w.poly!);
+    for (const h of w.holes ?? []) polyPath(g, h);
+  }
+
+  /** The shoreline only: a sea polygon's edges along the map border are not shore. */
+  private shorePath(g: CanvasRenderingContext2D, w: WaterBody): void {
+    if (!w.sea) return this.waterPath(g, w);
+    const W = this.map.width;
+    const H = this.map.height;
+    const e = 0.6;
+    const border = (a: { x: number; y: number }, b: { x: number; y: number }) =>
+      (a.x < e && b.x < e) || (a.x > W - e && b.x > W - e) || (a.y < e && b.y < e) || (a.y > H - e && b.y > H - e);
+    const p = w.poly!;
+    for (let i = 0; i < p.length; i++) {
+      const a = p[i];
+      const b = p[(i + 1) % p.length];
+      if (border(a, b)) continue;
+      g.moveTo(a.x, a.y);
+      g.lineTo(b.x, b.y);
+    }
+    for (const h of w.holes ?? []) polyPath(g, h);
+  }
+
   private drawWater(g: CanvasRenderingContext2D, r: Rect, scale: number): void {
     const ids = this.waterIdx.query(r);
     if (!ids.length) return;
@@ -1629,8 +1654,8 @@ export class MapRenderer {
       for (const w of list) {
         g.beginPath();
         if (w.poly) {
-          polyPath(g, w.poly);
-          g.lineWidth = 12;
+          this.shorePath(g, w);
+          g.lineWidth = w.sea ? 18 : 12;
           g.stroke();
         } else if (w.line) {
           linePath(g, w.line);
@@ -1642,9 +1667,11 @@ export class MapRenderer {
     for (const w of list) {
       g.beginPath();
       if (w.poly) {
-        polyPath(g, w.poly);
-        g.fillStyle = '#31474a';
-        g.fill();
+        this.waterPath(g, w);
+        g.fillStyle = w.sea ? '#2b4245' : '#31474a';
+        g.fill('evenodd');
+        g.beginPath();
+        this.shorePath(g, w);
         g.strokeStyle = '#3a4a2a';
         g.lineWidth = 3;
         g.stroke();
@@ -1656,13 +1683,28 @@ export class MapRenderer {
       }
     }
     if (scale >= 0.5) {
-      g.save();
-      g.beginPath();
-      for (const w of list) if (w.poly) polyPath(g, w.poly);
-      g.clip();
-      g.fillStyle = worldPattern(g, this.tex.water);
-      g.fillRect(r.x, r.y, r.w, r.h);
-      g.restore();
+      for (const w of list) {
+        if (!w.poly) continue;
+        g.save();
+        g.beginPath();
+        this.waterPath(g, w);
+        g.clip('evenodd');
+        g.fillStyle = worldPattern(g, this.tex.water);
+        g.fillRect(r.x, r.y, r.w, r.h);
+        if (w.sea) {
+          // surf: a pale band just off the shore
+          g.beginPath();
+          this.shorePath(g, w);
+          g.lineCap = 'round';
+          g.strokeStyle = 'rgba(190,200,190,0.10)';
+          g.lineWidth = 9;
+          g.stroke();
+          g.strokeStyle = 'rgba(210,215,205,0.16)';
+          g.lineWidth = 3;
+          g.stroke();
+        }
+        g.restore();
+      }
     }
     g.lineCap = 'butt';
   }

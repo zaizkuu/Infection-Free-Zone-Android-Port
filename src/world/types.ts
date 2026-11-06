@@ -177,8 +177,12 @@ export interface Way {
 /** Real-world water: a polygon (lake, river area) or a line with a width (stream). */
 export interface WaterBody {
   poly?: Vec[];
+  /** islands inside a sea polygon */
+  holes?: Vec[][];
   line?: Vec[];
   w?: number;
+  /** open sea (built from coastlines) */
+  sea?: boolean;
 }
 
 export interface MapData {
@@ -200,6 +204,8 @@ export interface MapData {
   /** Points on the map edge where hordes can enter (end of highways etc). */
   entries: Vec[];
   /** set for maps built from OpenStreetMap */
+  /** Point that vehicle placement is measured from (real maps; older maps use the HQ). */
+  vehicleRef?: Vec;
   real?: { lat: number; lon: number; name: string; half: number; scale: number };
   ways?: Way[];
   water?: WaterBody[];

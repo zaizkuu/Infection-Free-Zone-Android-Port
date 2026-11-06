@@ -18,8 +18,9 @@ import { Music } from './audio/music';
 import { Ui, type App } from './ui/ui';
 import { initPlatform, buzz, getLocation } from './platform';
 import { clearSave, hasSave, loadGame, loadPrefs, saveGame, savePrefs, type Prefs } from './save';
-import { buildRealMap, fetchOsm, reverseName, searchPlaces, type OsmData, type Place } from './world/osm';
+import { buildRealMap, canBeHaven, fetchOsm, makeHaven, realInfected, reverseName, searchPlaces, type OsmData, type Place } from './world/osm';
 import { loadMap, saveMap } from './world/mapstore';
+import { pointInPoly } from './world/geo';
 import { DAY_LEN, SQUAD_COLORS, STRUCTS, VEH_SEAT, WALL_MAX, migrate, nightness, newGame, type GameState, type OrderType, type StructKind } from './game/state';
 import { assignSurvivor, build, canBuildAt, canBuildWall, createRuntime, dismantle, fortify, orderSquad, populate, releaseVehicle, salvageInfo, squadMembers, step, stepFx, syncFog, unloadAll, vehicleOf, type Runtime } from './game/sim';
 
@@ -35,7 +36,9 @@ class Game implements App {
   paused = false;
   prefs: Prefs;
   placeError = '';
-  mode: 'title' | 'play' = 'title';
+  mode: 'title' | 'choose' | 'play' = 'title';
+  /** The building the town importer suggested as haven (shown while choosing). */
+  suggestedHq = -1;
 
   private canvas: HTMLCanvasElement;
   private ctx: CanvasRenderingContext2D;
@@ -105,6 +108,7 @@ class Game implements App {
     try {
       const { App: CapApp } = await import('@capacitor/app');
       await CapApp.addListener('backButton', () => {
+        if (this.mode === 'choose') return this.chooseBack();
         if (this.mode !== 'play') {
           const sc = this.ui.currentScreen;
           if (sc === 'loading') return this.cancelLoad();
@@ -161,8 +165,14 @@ class Game implements App {
     return rt;
   }
 
+  /** Clears selections and placement (they hold indices into the current map). */
+  private resetView(squad: number, building: number): void {
+    this.view = { selectedSquad: squad, selectedBuilding: building, selectedVehicle: -1, selectedStructure: -1, selectedProp: -1, placing: null, wallStart: null, ghost: null, ghostOk: false, markers: [], time: 0 };
+  }
+
   private startDemo(): void {
     this.useMap(this.procMap);
+    this.resetView(-1, -1);
     const st = newGame(this.map, SEED + 99);
     st.time = DAY_LEN * (15.5 / 24); // 21:30
     st.lastHour = 21.5;
@@ -202,17 +212,99 @@ class Game implements App {
     this.resize();
   }
 
-  /** Starts a game on a real-world map built from OpenStreetMap data. */
+  /**
+   * A real-world town has been built: let the player pick which building becomes their haven.
+   * The town is shown fully revealed and frozen at dawn until they press Start.
+   */
   startRealGame(map: MapData): void {
-    clearSave();
     this.useMap(map);
+    this.suggestedHq = map.hqId;
     const st = newGame(map, map.seed);
-    st.mapRef = { lat: map.real!.lat, lon: map.real!.lon, name: map.real!.name };
+    st.survivors = [];
     const rt = this.freshRuntime(st);
-    populate(st, rt, Math.round(150 + Math.min(130, map.buildings.length / 12)));
+    rt.explored.fill(1);
+    rt.fogDirty = true;
+    this.st = st;
+    this.rt = rt;
+    this.mode = 'choose';
+    this.paused = true;
+    this.acc = 0;
+    this.resetView(-1, map.hqId);
+    this.renderer.mapR.setWorldState([], []);
+    this.ui.hideScreens();
+    this.ui.showHud(true);
+    this.ui.setChoosing(true);
+    this.focusBuilding(map.hqId, 1.15);
+  }
+
+  private focusBuilding(id: number, zoom?: number): void {
+    const b = this.map.buildings[id];
+    if (zoom) this.cam.zoom = zoom;
+    this.cam.tx = b.x + b.w / 2;
+    this.cam.ty = b.y + b.h / 2 + 40 / this.cam.zoom;
+  }
+
+  /** While choosing: make another building the candidate haven. */
+  chooseCandidate(id: number): void {
+    const st = this.st;
+    if (this.mode !== 'choose' || !st) return;
+    const map = this.map;
+    const d = map.buildings[id];
+    if (!canBeHaven(d)) {
+      this.ui.toast(`${d.name} is too small to shelter your group. Pick something bigger.`, 'warn');
+      return;
+    }
+    const old = map.hqId;
+    st.b[old].owned = false;
+    st.b[old].fort = 0;
+    st.b[id].owned = true;
+    st.b[id].fort = 1;
+    map.hqId = id;
+    this.view.selectedBuilding = id;
+    this.ui.setChoosing(true);
+    this.click();
+  }
+
+  /** Starts Day 1 in the chosen haven. Whatever was stored inside joins the stockpile. */
+  chooseStart(): void {
+    const prev = this.st;
+    if (this.mode !== 'choose' || !prev) return;
+    const map = this.map;
+    const id = map.hqId;
+    const stash = { ...prev.b[id].loot };
+    makeHaven(map, id);
+    clearSave();
+    const st = newGame(map, map.seed);
+    st.b[id].loot = { food: 0, mat: 0, ammo: 0, med: 0, guns: 0, fuel: 0 };
+    st.mapRef = { lat: map.real!.lat, lon: map.real!.lon, name: map.real!.name };
+    st.res.food += stash.food;
+    st.res.mat += stash.mat;
+    st.res.ammo += stash.ammo + stash.guns * 12;
+    st.res.med += stash.med;
+    st.res.fuel += stash.fuel || 0;
+    const rt = this.freshRuntime(st);
+    populate(st, rt, realInfected(map));
+    this.ui.setChoosing(false);
     this.begin(st, rt);
     void saveMap(map);
-    this.ui.banner('Day 1', `${map.townName} has fallen. Your haven is ${map.buildings[map.hqId].name}. The dead come at night.`, 'info');
+    const parts = [
+      stash.food && `${stash.food} food`,
+      stash.mat && `${stash.mat} materials`,
+      stash.ammo + stash.guns * 12 && `${stash.ammo + stash.guns * 12} ammo`,
+      stash.med && `${stash.med} medicine`,
+      stash.fuel && `${stash.fuel} fuel`,
+    ].filter(Boolean);
+    this.ui.banner('Day 1', `${map.townName} has fallen. Your haven is ${map.buildings[id].name}. The dead come at night.`, 'info');
+    if (parts.length) this.ui.toast(`Found inside your haven: ${parts.join(', ')}.`, 'good');
+  }
+
+  /** Leaves the haven choice and goes back to the town picker. */
+  chooseBack(): void {
+    if (this.mode !== 'choose') return;
+    this.ui.setChoosing(false);
+    this.startDemo();
+    this.ui.showHud(false);
+    this.ui.showMapPicker();
   }
 
   search(q: string): Promise<Place[]> {
@@ -313,7 +405,7 @@ class Game implements App {
     this.paused = false;
     this.endTimer = -1;
     this.acc = 0;
-    this.view = { selectedSquad: 0, selectedBuilding: -1, selectedVehicle: -1, selectedStructure: -1, selectedProp: -1, placing: null, wallStart: null, ghost: null, ghostOk: false, markers: [], time: 0 };
+    this.resetView(0, -1);
     this.ui.hideScreens();
     this.ui.closePanel();
     this.ui.showHud(true);
@@ -522,12 +614,38 @@ class Game implements App {
 
   // ------------------------------------------------------------------ input
 
-  private hover(sx: number, sy: number): void {
+  /** The building under a world point. Real-world buildings test their footprint, walls and roof. */
+  private buildingAt(w: { x: number; y: number }): number {
+    const pad = 3 / this.cam.zoom;
+    let hit = -1;
+    let area = Infinity;
+    for (const b of this.map.buildings) {
+      if (w.x < b.x - pad || w.x > b.x + b.w + pad || w.y < b.y - pad || w.y > b.y + b.h + pad) continue;
+      const a = b.w * b.h;
+      if (b.poly) {
+        // the roof is drawn wallH above the footprint; walls fill the space between
+        const h = b.wallH;
+        if (!pointInPoly(b.poly, w.x, w.y) && !pointInPoly(b.poly, w.x, w.y + h * 0.5) && !pointInPoly(b.poly, w.x, w.y + h)) continue;
+      }
+      if (a < area) {
+        hit = b.id;
+        area = a;
+      }
+    }
+    return hit;
+  }
+
+    private hover(sx: number, sy: number): void {
     if (this.mode !== 'play' || !this.view.placing || !this.st || !this.rt) return;
     this.aim(this.cam.toWorld(sx, sy));
   }
 
   private tap(sx: number, sy: number): void {
+    if (this.mode === 'choose') {
+      const id = this.buildingAt(this.cam.toWorld(sx, sy));
+      if (id >= 0) this.chooseCandidate(id);
+      return;
+    }
     if (this.mode !== 'play' || !this.st || !this.rt || this.ui.screenOpen) return;
     const st = this.st;
     const rt = this.rt;
@@ -617,16 +735,7 @@ class Game implements App {
       this.click();
       return;
     }
-    // buildings (smallest containing rect wins)
-    const pad = 3 / this.cam.zoom;
-    let hit = -1;
-    let area = Infinity;
-    for (const b of this.map.buildings) {
-      if (w.x >= b.x - pad && w.x <= b.x + b.w + pad && w.y >= b.y - pad && w.y <= b.y + b.h + pad && b.w * b.h < area) {
-        hit = b.id;
-        area = b.w * b.h;
-      }
-    }
+    const hit = this.buildingAt(w);
     if (hit >= 0) {
       this.view.selectedBuilding = hit;
       this.ui.openPanel('building');

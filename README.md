@@ -10,7 +10,7 @@ The game is built with TypeScript and HTML5 Canvas and packaged as a native Andr
 
 ## Install on your phone
 
-1. On your Android phone, open this repository on GitHub and download [`releases/EmberHaven-0.5.0-debug.apk`](releases/EmberHaven-0.5.0-debug.apk). Tap **Download raw file**.
+1. On your Android phone, open this repository on GitHub and download [`releases/EmberHaven-0.6.0-debug.apk`](releases/EmberHaven-0.6.0-debug.apk). Tap **Download raw file**.
 2. Open the downloaded file. If Android asks, allow your browser or file manager to **install unknown apps**.
 3. Tap **Install** and launch **Ember Haven**. The game runs in landscape.
 
@@ -22,7 +22,7 @@ Every push to the repository also builds a fresh APK through GitHub Actions. You
 
 | | |
 |---|---|
-| **Choose your town** | **New game** opens the town picker. **Millbrook** is the pre-generated town and plays offline. **A real place** downloads about 1.2 × 1.2 km of real streets, buildings, parks and water around any town, district or address you search for, or around **your location**. |
+| **Choose your town** | **New game** opens the town picker. **Millbrook** is the pre-generated town and plays offline. **A real place** downloads about 1.2 × 1.2 km of real streets, buildings, parks and water around any town, district or address you search for, or around **your location**. Then **choose your haven**: tap any building to compare beds, wall strength and what's stored inside, and press **Start here**. |
 | **Command squads** | Tap a squad card (Alpha, Bravo, Charlie) to select it. Tap the ground to move it, or tap a building for orders. Tap the selected card again to assign or send home members. |
 | **Scout and scavenge** | Scouting reveals what's inside a building: supplies, infected and survivors. Scavenging brings everything back to your stockpile. Infected hiding inside burst out when you arrive. |
 | **Grow the haven** | Claim cleared buildings next to your haven for more beds. Rescued survivors walk to the haven and stand guard. |
@@ -81,17 +81,22 @@ Real towns are built from [OpenStreetMap](https://www.openstreetmap.org/) data:
 3. The importer (`src/world/osm.ts`) turns the data into a playable town:
    - **Buildings** keep their real outlines, heights (from `building:levels`) and roof shapes.
    - **Building types** come from OSM tags and the shops inside them, for example supermarkets, pharmacies, police and fire stations, schools, churches, warehouses, garages and houses. The type decides the loot, the survivors and how many infected are inside.
-   - **Roads** come in widths from highways down to footpaths, and **bridges** span rivers, canals and lakes.
+   - **Beds** follow the real floor space (about one per 80 m²), so big buildings are worth claiming.
+   - **Roads** come in widths from highways down to footpaths, and **bridges** span rivers, canals, lakes and harbours.
+   - **The sea** is filled in from the coastline, with islands and a surf line along the shore. Nothing spawns in the water, and the horde only comes in over land.
    - **Land** includes parks, woods, farmland, cemeteries and parking lots.
    - **Trees and cars** are placed around them, and the horde comes in along the roads that leave the map.
-4. Your haven starts at the nearest fire station if there is one, otherwise at a police station or another solid building near the centre.
+4. **You choose your haven.** The game suggests the nearest fire station (or a police station or another solid building near the centre), but you can pick any building of 70 m² or more:
+   - Your group clears it out and shores it up, so it starts with at least 8 beds and walls at least as strong as a small fire station. Bigger, sturdier buildings are stronger still.
+   - Whatever was stored inside joins your stockpile. A supermarket starts you with food, a hardware store with materials, a police station with ammo.
+   - A haven close to a road into town gets the horde sooner.
 
 The processed town is stored on the phone (IndexedDB), so **Continue** works offline afterwards.
 
 **Limits:**
 - Very dense city centres are capped at the 2,400 largest buildings.
 - Places with almost no mapped buildings make a sparse town.
-- Open sea coastlines aren't filled in yet, but rivers and lakes are.
+- A map that lies entirely at sea with no coastline in view is treated as land.
 
 Map data © OpenStreetMap contributors, available under the [Open Database Licence](https://www.openstreetmap.org/copyright). The attribution is shown in the picker, on the loading screen and in the HUD during play. The app identifies itself to the OSM services with its own user agent and sends nothing but the search text and map coordinates.
 
@@ -128,7 +133,7 @@ Millbrook is generated from a fixed seed (`SEED` in `src/main.ts`), so it's the 
 
 ## Roadmap ideas
 
-- Coastlines and the sea for seaside towns
+- Boats and piers for seaside towns
 - Bigger real-world maps (several square kilometres, streamed in)
 - Survivor traits and skills that improve with experience
 - Rival survivor groups and trading

@@ -194,3 +194,154 @@ export function assembleRings(lines: Vec[][]): Vec[][] {
   }
   return rings;
 }
+
+/**
+ * Even-odd scanline fill of a set of rings (outer ring plus holes): calls `span(y, x0, x1)` for
+ * every horizontal run inside, sampling rows at y0 + step/2, y0 + 3step/2, ...
+ */
+export function scanRings(rings: Vec[][], y0: number, y1: number, step: number, span: (y: number, x0: number, x1: number) => void): void {
+  const xs: number[] = [];
+  for (let y = y0 + step / 2; y < y1; y += step) {
+    xs.length = 0;
+    for (const p of rings)
+      for (let i = 0, j = p.length - 1; i < p.length; j = i++) {
+        const a = p[i];
+        const b = p[j];
+        if (a.y > y !== b.y > y) xs.push(a.x + ((y - a.y) * (b.x - a.x)) / (b.y - a.y));
+      }
+    xs.sort((a, b) => a - b);
+    for (let k = 0; k + 1 < xs.length; k += 2) span(y, xs[k], xs[k + 1]);
+  }
+}
+
+/**
+ * Sea areas inside the square [0, W]² built from OpenStreetMap coastline ways. Coastlines are
+ * drawn with the land on their left and the water on their right, so each piece that crosses the
+ * map is closed by walking clockwise along the map edge to the next piece. Islands that lie fully
+ * inside the map become holes.
+ */
+export function seaPolygons(lines: Vec[][], W: number): { poly: Vec[]; holes: Vec[][] }[] {
+  const near = (a: Vec, b: Vec) => Math.abs(a.x - b.x) < 0.05 && Math.abs(a.y - b.y) < 0.05;
+  const isClosed = (c: Vec[]) => c.length > 3 && near(c[0], c[c.length - 1]);
+  // 1. join ways head to tail into chains, keeping their direction
+  const open = lines.filter((l) => l.length >= 2).map((l) => l.slice());
+  const chains: Vec[][] = [];
+  while (open.length) {
+    let cur = open.pop()!;
+    for (let guard = 0; guard < 5000 && !isClosed(cur); guard++) {
+      const end = cur[cur.length - 1];
+      const i = open.findIndex((l) => near(l[0], end));
+      if (i >= 0) {
+        cur = cur.concat(open.splice(i, 1)[0].slice(1));
+        continue;
+      }
+      const start = cur[0];
+      const j = open.findIndex((l) => near(l[l.length - 1], start));
+      if (j < 0) break;
+      cur = open.splice(j, 1)[0].concat(cur.slice(1));
+    }
+    chains.push(cur);
+  }
+  const inside = (p: Vec) => p.x > 0 && p.x < W && p.y > 0 && p.y < W;
+  // an unfinished chain (data cut off) is extended straight to the nearest map edge
+  const toEdge = (p: Vec): Vec => {
+    const d = [p.y, W - p.x, W - p.y, p.x];
+    const k = d.indexOf(Math.min(...d));
+    return k === 0 ? { x: p.x, y: -1 } : k === 1 ? { x: W + 1, y: p.y } : k === 2 ? { x: p.x, y: W + 1 } : { x: -1, y: p.y };
+  };
+  // 2. clip chains to the map: pieces that enter and leave, and islands fully inside
+  const pieces: Vec[][] = [];
+  const islands: Vec[][] = [];
+  for (let c of chains) {
+    if (isClosed(c)) {
+      if (c.every(inside)) {
+        islands.push(c.slice(0, -1));
+        continue;
+      }
+    } else {
+      if (inside(c[0])) c = [toEdge(c[0]), ...c];
+      if (inside(c[c.length - 1])) c = [...c, toEdge(c[c.length - 1])];
+    }
+    let cur: Vec[] | null = null;
+    for (let i = 1; i < c.length; i++) {
+      const a = c[i - 1];
+      const b = c[i];
+      const dx = b.x - a.x;
+      const dy = b.y - a.y;
+      let t0 = 0;
+      let t1 = 1;
+      let ok = true;
+      const pp = [-dx, dx, -dy, dy];
+      const qq = [a.x, W - a.x, a.y, W - a.y];
+      for (let k = 0; k < 4 && ok; k++) {
+        if (pp[k] === 0) {
+          if (qq[k] < 0) ok = false;
+        } else {
+          const r = qq[k] / pp[k];
+          if (pp[k] < 0) {
+            if (r > t1) ok = false;
+            else if (r > t0) t0 = r;
+          } else if (r < t0) ok = false;
+          else if (r < t1) t1 = r;
+        }
+      }
+      if (!ok) {
+        if (cur) pieces.push(cur);
+        cur = null;
+        continue;
+      }
+      if (!cur) cur = [{ x: a.x + dx * t0, y: a.y + dy * t0 }];
+      cur.push({ x: a.x + dx * t1, y: a.y + dy * t1 });
+      if (t1 < 1) {
+        pieces.push(cur);
+        cur = null;
+      }
+    }
+    if (cur) pieces.push(cur);
+  }
+  // 3. position along the map edge, clockwise from the top-left corner
+  const tOf = (p: Vec) => {
+    const d = [Math.abs(p.y), Math.abs(W - p.x), Math.abs(W - p.y), Math.abs(p.x)];
+    const k = d.indexOf(Math.min(...d));
+    return k === 0 ? p.x : k === 1 ? W + p.y : k === 2 ? 3 * W - p.x : 4 * W - p.y;
+  };
+  const P = 4 * W;
+  const corners = [
+    { t: 0, p: { x: 0, y: 0 } },
+    { t: W, p: { x: W, y: 0 } },
+    { t: 2 * W, p: { x: W, y: W } },
+    { t: 3 * W, p: { x: 0, y: W } },
+  ];
+  const segs = pieces.filter((s) => s.length >= 2).map((s) => ({ pts: s, tIn: tOf(s[0]), tOut: tOf(s[s.length - 1]) }));
+  const used = new Set<number>();
+  const polys: Vec[][] = [];
+  for (let s0 = 0; s0 < segs.length; s0++) {
+    if (used.has(s0)) continue;
+    const poly: Vec[] = [];
+    let cur = s0;
+    for (let guard = 0; guard <= segs.length; guard++) {
+      used.add(cur);
+      poly.push(...segs[cur].pts);
+      const tOut = segs[cur].tOut;
+      let best = -1;
+      let bd = Infinity;
+      for (let k = 0; k < segs.length; k++) {
+        if (used.has(k) && k !== s0) continue;
+        const d = (((segs[k].tIn - tOut) % P) + P) % P;
+        if (d < bd) {
+          bd = d;
+          best = k;
+        }
+      }
+      if (best < 0) break;
+      const passed = corners.map((c) => ({ ...c, d: (((c.t - tOut) % P) + P) % P })).filter((c) => c.d > 1e-6 && c.d < bd).sort((a, b) => a.d - b.d);
+      for (const c of passed) poly.push(c.p);
+      if (best === s0) break;
+      cur = best;
+    }
+    if (poly.length >= 3) polys.push(poly);
+  }
+  // 4. a map with islands but no coastline crossing it lies entirely at sea
+  if (!polys.length && islands.length) polys.push(corners.map((c) => c.p));
+  return polys.map((poly) => ({ poly, holes: islands.filter((h) => pointInPoly(poly, h[0].x, h[0].y)) }));
+}
