@@ -118,6 +118,10 @@ export class MapRenderer {
   private reedPoly: Path2D;
   private riverBounds: Rect;
   private scratch: HTMLCanvasElement;
+  /** original map.props index of each entry in this.props */
+  private propSrc: number[];
+  private hiddenProps = new Set<number>();
+  private demolished = new Set<number>();
 
   constructor(private map: MapData) {
     this.tex = buildTextures(map.seed, map.width, map.height);
@@ -125,7 +129,8 @@ export class MapRenderer {
     this.areas = [...map.areas].sort((a, b) => (AREA_ORDER[a.kind] ?? 0) - (AREA_ORDER[b.kind] ?? 0));
     // drivable vehicles are drawn by the world renderer, not baked into tiles
     const dynamic = new Set(vehicleSpots(map));
-    this.props = map.props.filter((_, i) => !dynamic.has(i));
+    this.propSrc = map.props.map((_, i) => i).filter((i) => !dynamic.has(i));
+    this.props = this.propSrc.map((i) => map.props[i]);
     this.fences = map.fences;
     this.buildings = [...map.buildings].sort((a, b) => a.y + a.h - (b.y + b.h));
     const pad = (r: Rect, p: number, sx = 0, sy = 0): Rect => ({ x: r.x - p, y: r.y - p, w: r.w + p * 2 + sx, h: r.h + p * 2 + sy });
@@ -193,6 +198,43 @@ export class MapRenderer {
     BLUR = v;
     this.tiles.clear();
     this.warmup();
+  }
+
+  /** Applies a game's demolished buildings and scrapped cars (rebuilds the cache if they differ). */
+  setWorldState(demolished: number[], hiddenProps: number[]): void {
+    const same = (a: Set<number>, b: number[]) => a.size === b.length && b.every((x) => a.has(x));
+    if (same(this.demolished, demolished) && same(this.hiddenProps, hiddenProps)) return;
+    this.demolished = new Set(demolished);
+    this.hiddenProps = new Set(hiddenProps);
+    this.tiles.clear();
+    this.warmup();
+  }
+
+  markDemolished(id: number): void {
+    if (this.demolished.has(id)) return;
+    this.demolished.add(id);
+    const b = this.map.buildings[id];
+    this.invalidate({ x: b.x - 40, y: b.y - 40, w: b.w + 80, h: b.h + 80 });
+  }
+
+  hideProp(index: number): void {
+    if (this.hiddenProps.has(index)) return;
+    this.hiddenProps.add(index);
+    const p = this.map.props[index];
+    this.invalidate({ x: p.x - 40, y: p.y - 40, w: 80, h: 80 });
+  }
+
+  /** Drops cached tiles touching a world rect; coarse fallback tiles are redrawn right away. */
+  private invalidate(r: Rect): void {
+    const redo: [number, number][] = [];
+    for (const key of [...this.tiles.keys()]) {
+      const [l, tx, ty] = key.split(':').map(Number);
+      const tw = TILE / LEVELS[l];
+      if (!intersects({ x: tx * tw, y: ty * tw, w: tw, h: tw }, r)) continue;
+      this.tiles.delete(key);
+      if (l === 0) redo.push([tx, ty]);
+    }
+    for (const [tx, ty] of redo) this.getTile(0, tx, ty, true);
   }
 
   /** Pre-render the coarsest level so there is always a fallback to show. */
@@ -379,8 +421,10 @@ export class MapRenderer {
     for (const i of this.fenceIdx.query(r)) this.drawFence(g, this.fences[i]);
 
     // Ambient occlusion + soft cast shadows (single union fills, so overlaps don't stack)
-    const propIds = this.propIdx.query(r);
-    const bldIds = this.bldIdx.query(r);
+    const propIds = this.propIdx.query(r).filter((i) => !this.hiddenProps.has(this.propSrc[i]));
+    const allB = this.bldIdx.query(r);
+    const bldIds = allB.filter((i) => !this.demolished.has(this.buildings[i].id));
+    for (const i of allB) if (this.demolished.has(this.buildings[i].id)) this.drawRubble(g, this.buildings[i], scale);
     blurred(g, 4.5 * scale, () => {
       g.fillStyle = 'rgba(8,10,8,0.42)';
       g.beginPath();
@@ -1492,6 +1536,88 @@ export class MapRenderer {
     g.fillStyle = 'rgba(0,0,0,0.4)';
     g.fillRect(x + w - 0.8, y, 0.8, b.h);
     g.fillRect(x, y + b.h - 0.9, w, 0.9);
+  }
+
+  /** A torn-down building: cracked slab, wall stubs and heaps of debris. */
+  private drawRubble(g: CanvasRenderingContext2D, b: BuildingDef, scale: number): void {
+    const h = (n: number) => hash2(b.id, n, 123);
+    blurred(g, 3 * scale, () => {
+      g.fillStyle = 'rgba(10,9,8,0.4)';
+      g.fillRect(b.x - 1, b.y, b.w + 5, b.h + 4);
+    });
+    g.fillStyle = '#48443e';
+    g.fillRect(b.x, b.y, b.w, b.h);
+    if (scale >= 0.5) {
+      g.globalAlpha = 0.7;
+      g.fillStyle = worldPattern(g, this.tex.concrete);
+      g.fillRect(b.x, b.y, b.w, b.h);
+      g.globalAlpha = 1;
+    }
+    // broken wall stubs along the old outline
+    g.strokeStyle = shade(b.wallColor, -0.45);
+    g.lineWidth = 1.8;
+    g.beginPath();
+    const edge = (x1: number, y1: number, x2: number, y2: number, k: number) => {
+      const len = Math.hypot(x2 - x1, y2 - y1);
+      for (let t = 0; t < len; t += 7) {
+        if (h(k * 100 + t) < 0.45) continue;
+        const a = t / len;
+        const e = Math.min(1, (t + 4 + h(k * 50 + t) * 3) / len);
+        g.moveTo(x1 + (x2 - x1) * a, y1 + (y2 - y1) * a);
+        g.lineTo(x1 + (x2 - x1) * e, y1 + (y2 - y1) * e);
+      }
+    };
+    edge(b.x, b.y, b.x + b.w, b.y, 1);
+    edge(b.x + b.w, b.y, b.x + b.w, b.y + b.h, 2);
+    edge(b.x, b.y + b.h, b.x + b.w, b.y + b.h, 3);
+    edge(b.x, b.y, b.x, b.y + b.h, 4);
+    g.stroke();
+    // debris heaps
+    const cols = [shade(b.roofColor, -0.25), shade(b.wallColor, -0.3), '#5d5850', '#3e3a35', shade(b.wallColor, -0.1)];
+    const piles = Math.max(2, Math.round((b.w * b.h) / 1400));
+    for (let p = 0; p < piles; p++) {
+      const px = b.x + b.w * (0.15 + h(10 + p) * 0.7);
+      const py = b.y + b.h * (0.15 + h(20 + p) * 0.7);
+      const pr = Math.min(b.w, b.h) * (0.18 + h(30 + p) * 0.18);
+      const mound = g.createRadialGradient(px - pr * 0.3, py - pr * 0.3, 0, px, py, pr);
+      mound.addColorStop(0, '#6a645a');
+      mound.addColorStop(0.7, '#4f4a43');
+      mound.addColorStop(1, 'rgba(60,56,50,0)');
+      g.fillStyle = mound;
+      g.beginPath();
+      g.ellipse(px, py, pr, pr * 0.8, h(40 + p) * 3, 0, Math.PI * 2);
+      g.fill();
+      const n = Math.round(pr * (scale >= 0.7 ? 1.4 : 0.6));
+      for (let k = 0; k < n; k++) {
+        const a = h(100 + p * 50 + k) * Math.PI * 2;
+        const rr = pr * Math.sqrt(h(200 + p * 50 + k)) * 0.9;
+        const cx = px + Math.cos(a) * rr;
+        const cy = py + Math.sin(a) * rr * 0.8;
+        const sz = 1.2 + h(300 + p * 50 + k) * 2.8;
+        g.save();
+        g.translate(cx, cy);
+        g.rotate(h(400 + k) * 3);
+        g.fillStyle = 'rgba(0,0,0,0.35)';
+        g.fillRect(-sz / 2 + 0.6, -sz / 3 + 0.6, sz, sz * 0.66);
+        g.fillStyle = cols[k % cols.length];
+        g.fillRect(-sz / 2, -sz / 3, sz, sz * 0.66);
+        g.restore();
+      }
+    }
+    // splintered beams
+    if (scale >= 0.5) {
+      g.strokeStyle = '#3d2f22';
+      g.lineWidth = 1.1;
+      g.lineCap = 'round';
+      for (let k = 0; k < Math.max(2, piles * 2); k++) {
+        const x = b.x + b.w * h(500 + k);
+        const y = b.y + b.h * h(600 + k);
+        const a = h(700 + k) * Math.PI;
+        const l = 6 + h(800 + k) * 12;
+        line(g, x, y, x + Math.cos(a) * l, y + Math.sin(a) * l);
+      }
+      g.lineCap = 'butt';
+    }
   }
 
   private drawDamage(g: CanvasRenderingContext2D, b: BuildingDef, rh: number, h: (n: number) => number, scale: number): void {

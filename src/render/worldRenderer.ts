@@ -4,7 +4,7 @@ import { makeCanvas } from './textures';
 import { hexA, shade, type Vec } from '../core/math';
 import { hash2 } from '../core/rng';
 import type { MapData } from '../world/types';
-import { BUILD_RANGE, FOG_CELL, GUARD_COLOR, SQUAD_COLORS, STRUCTS, VEHICLES, VEH_SEAT, WEATHER, ZKINDS, hourOf, maxHpOf, nightness, type GameState, type StructKind, type Survivor, type Vehicle, type Zombie } from '../game/state';
+import { BUILD_RANGE, FOG_CELL, GUARD_COLOR, SQUAD_COLORS, STRUCTS, VEHICLES, VEH_SEAT, WALL_MAX, WEATHER, ZKINDS, type Structure, hourOf, maxHpOf, nightness, type GameState, type StructKind, type Survivor, type Vehicle, type Zombie } from '../game/state';
 import type { Prop } from '../world/types';
 import type { Runtime } from '../game/sim';
 
@@ -21,6 +21,11 @@ export interface ViewState {
   selectedBuilding: number;
   selectedVehicle: number;
   placing: StructKind | null;
+  /** first point of a wall being placed */
+  wallStart: Vec | null;
+  selectedStructure: number;
+  /** map prop index of a selected abandoned car */
+  selectedProp: number;
   ghost: Vec | null;
   ghostOk: boolean;
   markers: { x: number; y: number; t: number; c: string }[];
@@ -200,11 +205,53 @@ export class WorldRenderer {
       brackets(ctx, d.x - 4 - pulse, d.y - 4 - pulse, d.w + 8 + pulse * 2, d.h + 8 + pulse * 2, Math.min(12, d.w / 3, d.h / 3), 2 / Math.min(1.2, cam.zoom));
     }
 
+    // buildings being torn down
+    st.b.forEach((b, i) => {
+      if (!b.demo || b.demolished) return;
+      const d = this.map.buildings[i];
+      if (!inView(d.x + d.w / 2, d.y + d.h / 2, Math.max(d.w, d.h))) return;
+      drawDemolition(ctx, d, b.demo, now, cam.zoom);
+    });
+    // selected abandoned car
+    if (view.selectedProp >= 0) {
+      const p = this.map.props[view.selectedProp];
+      if (p) {
+        ctx.strokeStyle = '#fff4e6';
+        ctx.lineWidth = 1.6 / Math.min(1.2, cam.zoom);
+        ctx.setLineDash([4 / Math.min(1, cam.zoom), 3 / Math.min(1, cam.zoom)]);
+        ctx.beginPath();
+        ctx.arc(p.x, p.y, 15 + Math.sin(now * 5) * 1.2, 0, Math.PI * 2);
+        ctx.stroke();
+        ctx.setLineDash([]);
+      }
+    }
+
     // ---- structures ----
     for (const sobj of st.structures) {
-      if (!inView(sobj.x, sobj.y)) continue;
-      drawStructure(ctx, sobj.kind, sobj.x, sobj.y, now + sobj.id, night, 1);
-      if (sobj.hp < STRUCTS[sobj.kind].hp) bar(ctx, sobj.x, sobj.y - STRUCTS[sobj.kind].r - 12, 18, 2.2, sobj.hp / STRUCTS[sobj.kind].hp, '#7ccf6a');
+      const wall = sobj.kind === 'wall';
+      const cx = wall ? (sobj.x + sobj.x2!) / 2 : sobj.x;
+      const cy = wall ? (sobj.y + sobj.y2!) / 2 : sobj.y;
+      if (!inView(cx, cy, wall ? WALL_MAX : 40)) continue;
+      if (wall) drawWall(ctx, sobj, cam.zoom);
+      else if (sobj.built < 1) drawSite(ctx, sobj, now, night);
+      else drawStructure(ctx, sobj.kind, sobj.x, sobj.y, now + sobj.id, night, 1);
+      const top = wall ? cy - 8 : sobj.y - STRUCTS[sobj.kind].r - 12;
+      if (sobj.built < 1) progressRing(ctx, cx, top - 2, sobj.built, cam.zoom);
+      else if (sobj.hp < STRUCTS[sobj.kind].hp) bar(ctx, cx, top, 18, 2.2, sobj.hp / STRUCTS[sobj.kind].hp, '#7ccf6a');
+      if (view.selectedStructure === sobj.id) {
+        ctx.strokeStyle = '#fff4e6';
+        ctx.lineWidth = 1.5 / Math.min(1.2, cam.zoom);
+        ctx.setLineDash([4 / Math.min(1, cam.zoom), 3 / Math.min(1, cam.zoom)]);
+        ctx.beginPath();
+        if (wall) {
+          ctx.moveTo(sobj.x, sobj.y);
+          ctx.lineTo(sobj.x2!, sobj.y2!);
+          ctx.lineWidth = 9 / Math.min(1.2, cam.zoom);
+          ctx.strokeStyle = 'rgba(255,244,230,0.35)';
+        } else ctx.arc(sobj.x, sobj.y, STRUCTS[sobj.kind].r + 6 + Math.sin(now * 5), 0, Math.PI * 2);
+        ctx.stroke();
+        ctx.setLineDash([]);
+      }
     }
     // vehicles
     for (const v of st.vehicles ?? []) {
@@ -292,7 +339,37 @@ export class WorldRenderer {
     }
 
     // ---- placement ghost ----
-    if (view.placing && view.ghost) {
+    if (view.placing === 'wall') {
+      const a = view.wallStart;
+      const b = view.ghost;
+      const col = view.ghostOk ? '#7ccf6a' : '#e5484d';
+      if (a) {
+        ctx.fillStyle = col;
+        ctx.beginPath();
+        ctx.arc(a.x, a.y, 3.5, 0, Math.PI * 2);
+        ctx.fill();
+      }
+      if (a && b) {
+        const ghost: Structure = { id: -1, kind: 'wall', x: a.x, y: a.y, x2: b.x, y2: b.y, hp: STRUCTS.wall.hp, cd: 0, t: 0, built: 1, cost: 0 };
+        ctx.globalAlpha = 0.6;
+        drawWall(ctx, ghost, cam.zoom);
+        ctx.globalAlpha = 1;
+        ctx.strokeStyle = col;
+        ctx.lineWidth = 1.4 / Math.min(1, cam.zoom);
+        ctx.setLineDash([5 / Math.min(1, cam.zoom), 4 / Math.min(1, cam.zoom)]);
+        ctx.beginPath();
+        ctx.moveTo(a.x, a.y);
+        ctx.lineTo(b.x, b.y);
+        ctx.stroke();
+        ctx.setLineDash([]);
+      } else if (b) {
+        ctx.strokeStyle = col;
+        ctx.lineWidth = 1.5 / Math.min(1, cam.zoom);
+        ctx.beginPath();
+        ctx.arc(b.x, b.y, 5, 0, Math.PI * 2);
+        ctx.stroke();
+      }
+    } else if (view.placing && view.ghost) {
       ctx.globalAlpha = 0.75;
       drawStructure(ctx, view.placing, view.ghost.x, view.ghost.y, now, 0, 1);
       ctx.globalAlpha = 1;
@@ -545,6 +622,7 @@ export class WorldRenderer {
       warmGlows.push([d.x + d.w / 2, d.y + d.h / 2, r * 0.8, 0.12]);
     });
     for (const s of st.structures) {
+      if (s.built < 1 || s.kind === 'wall' || s.kind === 'trap') continue;
       const flick = 0.9 + Math.sin(now * 13 + s.id) * 0.05 + Math.sin(now * 7.3 + s.id * 2) * 0.05;
       if (s.kind === 'tower') {
         glow(s.x, s.y, 120, 0.9);
@@ -763,8 +841,20 @@ function drawSurvivor(ctx: CanvasRenderingContext2D, s: Survivor, now: number): 
   ctx.ellipse(step * 2.2, -1.6, 1.8, 1.2, 0, 0, Math.PI * 2);
   ctx.ellipse(-step * 2.2, 1.6, 1.8, 1.2, 0, 0, Math.PI * 2);
   ctx.fill();
-  // gun
-  if (s.gun > 0) {
+  // hammer or pry bar while working a job
+  if (s.working) {
+    const sw = Math.sin(now * 13 + s.id) * 0.9;
+    const hx = 2 + Math.cos(sw) * 7;
+    const hy = -1 + Math.sin(sw) * 7;
+    ctx.strokeStyle = '#6b5a48';
+    ctx.lineWidth = 1.2;
+    ctx.beginPath();
+    ctx.moveTo(1.5, -1.5);
+    ctx.lineTo(hx, hy);
+    ctx.stroke();
+    ctx.fillStyle = '#9aa0a6';
+    ctx.fillRect(hx - 1.3, hy - 1.3, 2.6, 2.6);
+  } else if (s.gun > 0) {
     ctx.strokeStyle = '#1b1d21';
     ctx.lineWidth = s.gun === 2 ? 1.5 : 1.3;
     ctx.beginPath();
@@ -811,7 +901,6 @@ function drawSurvivor(ctx: CanvasRenderingContext2D, s: Survivor, now: number): 
   ctx.arc(-0.1, 0, 1.9, Math.PI * 0.55, Math.PI * 1.45);
   ctx.fill();
   ctx.restore();
-  void now;
 }
 
 function drawZombie(ctx: CanvasRenderingContext2D, z: Zombie, now: number): void {
@@ -939,6 +1028,28 @@ export function drawStructure(ctx: CanvasRenderingContext2D, kind: StructKind, x
       ctx.fill();
       break;
     }
+    case 'trap': {
+      ctx.fillStyle = 'rgba(0,0,0,0.3)';
+      ctx.fillRect(-5, -4, 12, 11);
+      ctx.fillStyle = '#3e3326';
+      ctx.fillRect(-6, -6, 12, 12);
+      ctx.strokeStyle = '#2a2219';
+      ctx.lineWidth = 0.6;
+      ctx.strokeRect(-6, -6, 12, 12);
+      ctx.fillStyle = '#9ea2a3';
+      for (let i = -4; i <= 4; i += 4)
+        for (let j = -4; j <= 4; j += 4) {
+          ctx.beginPath();
+          ctx.moveTo(i, j - 1.6);
+          ctx.lineTo(i + 1.2, j + 1);
+          ctx.lineTo(i - 1.2, j + 1);
+          ctx.closePath();
+          ctx.fill();
+        }
+      break;
+    }
+    case 'wall':
+      break;
     case 'barrel': {
       ctx.fillStyle = 'rgba(0,0,0,0.3)';
       ctx.beginPath();
@@ -1027,4 +1138,145 @@ export function drawStructure(ctx: CanvasRenderingContext2D, kind: StructKind, x
     }
   }
   ctx.restore();
+}
+
+function progressRing(ctx: CanvasRenderingContext2D, x: number, y: number, p: number, zoom: number): void {
+  const r = 5 / Math.min(1, zoom);
+  ctx.fillStyle = 'rgba(12,16,22,0.8)';
+  ctx.beginPath();
+  ctx.arc(x, y, r + 1.8, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.strokeStyle = 'rgba(255,255,255,0.15)';
+  ctx.lineWidth = 1.8 / Math.min(1, zoom);
+  ctx.beginPath();
+  ctx.arc(x, y, r, 0, Math.PI * 2);
+  ctx.stroke();
+  ctx.strokeStyle = '#ffb36b';
+  ctx.beginPath();
+  ctx.arc(x, y, r, -Math.PI / 2, -Math.PI / 2 + Math.max(0.02, p) * Math.PI * 2);
+  ctx.stroke();
+}
+
+/** A palisade of sharpened stakes; gaps appear as it takes damage. Unfinished walls show their outline. */
+export function drawWall(ctx: CanvasRenderingContext2D, s: Structure, zoom: number): void {
+  const x2 = s.x2 ?? s.x;
+  const y2 = s.y2 ?? s.y;
+  const len = Math.hypot(x2 - s.x, y2 - s.y) || 1;
+  const ux = (x2 - s.x) / len;
+  const uy = (y2 - s.y) / len;
+  const hp = Math.max(0, s.hp / STRUCTS.wall.hp);
+  const built = s.built >= 1 ? len : len * s.built;
+  ctx.lineCap = 'round';
+  if (s.built < 1) {
+    ctx.strokeStyle = 'rgba(255,200,140,0.45)';
+    ctx.lineWidth = 1.2 / Math.min(1, zoom);
+    ctx.setLineDash([3, 3]);
+    ctx.beginPath();
+    ctx.moveTo(s.x, s.y);
+    ctx.lineTo(x2, y2);
+    ctx.stroke();
+    ctx.setLineDash([]);
+  }
+  if (built > 1) {
+    const ex = s.x + ux * built;
+    const ey = s.y + uy * built;
+    ctx.strokeStyle = 'rgba(0,0,0,0.42)';
+    ctx.lineWidth = 5;
+    ctx.beginPath();
+    ctx.moveTo(s.x + 2, s.y + 2.4);
+    ctx.lineTo(ex + 2, ey + 2.4);
+    ctx.stroke();
+    ctx.strokeStyle = '#3f3022';
+    ctx.lineWidth = 3.4;
+    ctx.beginPath();
+    ctx.moveTo(s.x, s.y);
+    ctx.lineTo(ex, ey);
+    ctx.stroke();
+    for (let t = 0, i = 0; t <= built; t += 2.6, i++) {
+      const gap = hash2(s.id, i, 41) > hp + 0.3;
+      if (gap) continue;
+      const x = s.x + ux * t;
+      const y = s.y + uy * t;
+      ctx.fillStyle = i % 2 ? '#5e4731' : '#6e5539';
+      ctx.beginPath();
+      ctx.arc(x, y, 1.55, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.fillStyle = '#8f744f';
+      ctx.beginPath();
+      ctx.arc(x - 0.45, y - 0.45, 0.6, 0, Math.PI * 2);
+      ctx.fill();
+    }
+    // cross braces
+    ctx.strokeStyle = '#2f241a';
+    ctx.lineWidth = 0.8;
+    for (let t = 8; t < built; t += 18) {
+      const x = s.x + ux * t;
+      const y = s.y + uy * t;
+      ctx.beginPath();
+      ctx.moveTo(x - uy * 3.4, y + ux * 3.4);
+      ctx.lineTo(x + uy * 3.4, y - ux * 3.4);
+      ctx.stroke();
+    }
+  }
+  ctx.lineCap = 'butt';
+}
+
+/** Construction site: faint outline of the finished thing, scaffolding and a lumber pile. */
+function drawSite(ctx: CanvasRenderingContext2D, s: Structure, now: number, night: number): void {
+  ctx.globalAlpha = 0.35 + s.built * 0.4;
+  drawStructure(ctx, s.kind, s.x, s.y, now + s.id, night, 1);
+  ctx.globalAlpha = 1;
+  const r = STRUCTS[s.kind].r + 2;
+  ctx.strokeStyle = '#8b6b45';
+  ctx.lineWidth = 0.9;
+  ctx.strokeRect(s.x - r, s.y - r, r * 2, r * 2);
+  ctx.beginPath();
+  ctx.moveTo(s.x - r, s.y - r);
+  ctx.lineTo(s.x + r, s.y + r);
+  ctx.moveTo(s.x + r, s.y - r);
+  ctx.lineTo(s.x - r, s.y + r);
+  ctx.stroke();
+  ctx.fillStyle = '#6e5539';
+  ctx.fillRect(s.x + r + 2, s.y + r - 4, 7, 2);
+  ctx.fillRect(s.x + r + 2, s.y + r - 1.6, 7, 2);
+}
+
+/** Holes, dust and scaffolding spreading over a building while it is torn down. */
+function drawDemolition(ctx: CanvasRenderingContext2D, d: { id: number; x: number; y: number; w: number; h: number; wallH: number }, p: number, now: number, zoom: number): void {
+  const rh = d.h - d.wallH;
+  ctx.fillStyle = `rgba(22,19,16,${0.12 + p * 0.38})`;
+  ctx.fillRect(d.x, d.y, d.w, d.h);
+  const n = Math.floor(p * 10);
+  for (let k = 0; k < n; k++) {
+    const hx = d.x + d.w * (0.12 + hash2(d.id, k, 61) * 0.76);
+    const hy = d.y + rh * (0.15 + hash2(d.id, k, 62) * 0.7);
+    const hr = Math.min(d.w, rh) * (0.06 + hash2(d.id, k, 63) * 0.08);
+    ctx.fillStyle = '#0b0a09';
+    ctx.beginPath();
+    ctx.ellipse(hx, hy, hr, hr * 0.75, hash2(d.id, k, 64) * 3, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.fillStyle = '#5d564c';
+    ctx.fillRect(hx - hr * 0.6, hy + hr * 0.3, hr * 0.5, hr * 0.3);
+  }
+  // scaffolding poles along the walls
+  ctx.strokeStyle = 'rgba(150,120,80,0.8)';
+  ctx.lineWidth = 0.8;
+  ctx.beginPath();
+  for (let x = d.x; x <= d.x + d.w; x += 12) {
+    ctx.moveTo(x, d.y - 2);
+    ctx.lineTo(x, d.y + d.h + 2);
+  }
+  ctx.moveTo(d.x - 2, d.y - 1.5);
+  ctx.lineTo(d.x + d.w + 2, d.y - 1.5);
+  ctx.moveTo(d.x - 2, d.y + d.h + 1.5);
+  ctx.lineTo(d.x + d.w + 2, d.y + d.h + 1.5);
+  ctx.stroke();
+  // progress bar
+  const w = Math.min(d.w, 70);
+  const k = 1 / Math.min(1.2, Math.max(0.6, zoom));
+  const y = d.y - 9 * k;
+  ctx.fillStyle = 'rgba(10,12,16,0.8)';
+  ctx.fillRect(d.x + d.w / 2 - w / 2 - 1, y - 1, w + 2, 4 * k + 2);
+  ctx.fillStyle = `rgba(255,179,107,${0.8 + Math.sin(now * 4) * 0.2})`;
+  ctx.fillRect(d.x + d.w / 2 - w / 2, y, w * p, 4 * k);
 }

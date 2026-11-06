@@ -8,7 +8,10 @@ import {
   STRUCTS,
   VEHICLES,
   VEH_SEAT,
+  WALL_MAX,
   WEATHER,
+  wallCost,
+  workFor,
   capacity,
   hourOf,
   isNight,
@@ -19,7 +22,7 @@ import {
   type StructKind,
   type Survivor,
 } from '../game/state';
-import { TUTORIAL, canClaim, engineerAtHaven, fortCost, repairCost, squadMembers, structCost, vehicleOf, type Runtime, type Tone } from '../game/sim';
+import { TUTORIAL, canClaim, canDemolish, demolishInfo, engineerAtHaven, fortCost, refundOf, repairCost, salvageInfo, squadMembers, structCost, vehicleOf, vehicleSalvageInfo, type Runtime, type Tone } from '../game/sim';
 import type { MapData } from '../world/types';
 import type { ViewState } from '../render/worldRenderer';
 import type { Prefs } from '../save';
@@ -32,6 +35,8 @@ export interface App {
   paused: boolean;
   prefs: Prefs;
   setPref<K extends keyof Prefs>(k: K, v: Prefs[K]): void;
+  /** why the current placement is invalid */
+  placeError: string;
   setSpeed(n: number): void;
   togglePause(): void;
   selectSquad(i: number): void;
@@ -43,6 +48,8 @@ export interface App {
   cancelPlace(): void;
   assign(survivorId: number, squad: number): void;
   vehicleAction(a: 'in' | 'out' | 'leave'): void;
+  salvage(t: { p?: number; v?: number }): void;
+  dismantle(id: number): void;
   focusHaven(): void;
   newGame(): void;
   continueGame(): void;
@@ -51,7 +58,7 @@ export interface App {
   click(): void;
 }
 
-type PanelMode = 'none' | 'building' | 'build' | 'squad' | 'guards' | 'vehicle';
+type PanelMode = 'none' | 'building' | 'build' | 'squad' | 'guards' | 'vehicle' | 'structure' | 'prop';
 
 const esc = (s: string) => s.replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' })[c]!);
 
@@ -184,7 +191,20 @@ export class Ui {
       case 'scout':
       case 'scavenge':
       case 'claim':
+      case 'demolish':
         this.app.order(act, b);
+        this.closePanel();
+        break;
+      case 'scrap':
+        this.app.salvage({ p: this.app.view.selectedProp });
+        this.closePanel();
+        break;
+      case 'scrap-veh':
+        this.app.salvage({ v: this.app.view.selectedVehicle });
+        this.closePanel();
+        break;
+      case 'dismantle':
+        this.app.dismantle(this.app.view.selectedStructure);
         this.closePanel();
         break;
       case 'take':
@@ -293,6 +313,8 @@ export class Ui {
   closePanel(): void {
     if (this.panel === 'building') this.app.view.selectedBuilding = -1;
     if (this.panel === 'vehicle') this.app.view.selectedVehicle = -1;
+    if (this.panel === 'structure') this.app.view.selectedStructure = -1;
+    if (this.panel === 'prop') this.app.view.selectedProp = -1;
     this.panel = 'none';
     this.el.card.classList.add('hidden');
   }
@@ -317,6 +339,14 @@ export class Ui {
       const id = this.app.view.selectedVehicle;
       if (id < 0) return this.closePanel();
       html = this.vehicleCard(st, id);
+    } else if (this.panel === 'structure') {
+      if (this.app.view.selectedStructure < 0) return this.closePanel();
+      html = this.structureCard(st);
+      if (!html) return this.closePanel();
+    } else if (this.panel === 'prop') {
+      if (this.app.view.selectedProp < 0) return this.closePanel();
+      html = this.propCard(st, rt);
+      if (!html) return this.closePanel();
     } else if (this.panel === 'build') html = this.buildSheet(st);
     else if (this.panel === 'squad') html = this.squadSheet(st);
     else if (this.panel === 'guards') html = this.guardsSheet(st);
@@ -368,6 +398,9 @@ export class Ui {
   private buildingCard(st: GameState, rt: Runtime, id: number): string {
     const d = this.app.map.buildings[id];
     const b = st.b[id];
+    if (b.demolished) {
+      return `${this.head(`Ruins of ${d.name}`, d.sub)}<div class="tags"><span class="tag">Rubble</span></div><div class="note">Torn down for materials. The cleared lot can be built on if it's close to your haven.</div>`;
+    }
     const sq = this.app.view.selectedSquad;
     const members = sq >= 0 ? squadMembers(st, sq) : [];
     const busyHere = st.squads.some((s) => s.order.b === id && s.order.phase !== 'done' && s.order.t !== 'idle');
@@ -388,6 +421,12 @@ export class Ui {
       body += `<div class="kv"><span>Structure</span><b data-bhptext></b></div>`;
       body += `<div class="kv"><span>Barricades</span><b>${['None', 'Planks', 'Sandbags', 'Steel'][b.fort]}</b></div>`;
       body += `<div class="kv"><span>Beds</span><b>${d.capacity}</b></div>`;
+    }
+    if (b.demo && b.demo > 0) {
+      body += `<div class="kv"><span>${I.demolish} Demolition</span><b>${Math.round(b.demo * 100)}%</b></div><div class="hpbar"><i style="width:${b.demo * 100}%;background:var(--ember-2)"></i></div>`;
+    }
+    if (b.owned) {
+      // (haven details above)
     } else if (b.explored) {
       const cell = (ic: string, n: number, col: string) => `<div class="${n ? '' : 'zero'}" style="color:${col}">${ic}<span style="color:var(--text)">${n}</span></div>`;
       body += `<div class="loot six">${cell(I.food, l.food, 'var(--food)')}${cell(I.mat, l.mat, 'var(--mat)')}${cell(I.ammo, l.ammo, 'var(--ammo)')}${cell(I.med, l.med, 'var(--med)')}${cell(I.fuel, l.fuel || 0, 'var(--fuel)')}${cell(I.gun, l.guns, '#b0bec5')}</div>`;
@@ -403,7 +442,7 @@ export class Ui {
         btns += `<button class="btn primary" data-act="fortify" ${st.res.mat < cost ? 'disabled' : ''}>${I.fortify}Fortify <small>${cost} mat</small></button>`;
       } else btns += `<button class="btn" disabled>${I.fortify}Max barricades</button>`;
       if (id === this.app.map.hqId) btns += `<button class="btn" data-act="build">${I.hammer}Build</button>`;
-      else btns += `<button class="btn" data-act="haven">${I.haven}Haven</button>`;
+      else btns += this.demolishBtn(st, rt, id, noSquad);
     } else {
       if (!b.explored) {
         btns += `<button class="btn" data-act="scout" ${noSquad ? 'disabled' : ''}>${I.scout}Scout</button>`;
@@ -414,14 +453,56 @@ export class Ui {
       }
       const why = canClaim(st, rt, id);
       btns += `<button class="btn" data-act="claim" ${noSquad || why ? 'disabled' : ''}>${I.claim}Claim <small>+${d.capacity} beds</small></button>`;
+      btns += this.demolishBtn(st, rt, id, noSquad);
     }
     let footer = '';
+    if (b.owned && id !== this.app.map.hqId) footer = `<div class="note">Demolishing this part of your haven loses its ${d.capacity} beds and barricades.</div>${this.squadChip(st)}`;
     if (!b.owned) {
       const why = canClaim(st, rt, id);
       footer = this.squadChip(st, busyHere) + (why && b.explored && !noSquad ? `<div class="note" style="margin-top:4px">Claim: ${why.toLowerCase()}.</div>` : '');
     }
     const btnCount = (btns.match(/class="btn/g) || []).length;
     return `${this.head(d.name, d.sub)}<div class="tags">${tags.join('')}</div>${body}<div class="btns ${btnCount === 1 ? 'one' : ''}">${btns}</div>${footer}`;
+  }
+
+  private demolishBtn(st: GameState, rt: Runtime, id: number, noSquad: boolean): string {
+    if (canDemolish(st, rt, id)) return '';
+    const info = demolishInfo(rt, id);
+    const going = (st.b[id].demo ?? 0) > 0;
+    return `<button class="btn" data-act="demolish" ${noSquad ? 'disabled' : ''}>${I.demolish}${going ? 'Keep tearing down' : 'Demolish'} <small>+${info.mat} mat</small></button>`;
+  }
+
+  private structureCard(st: GameState): string {
+    const s = st.structures.find((q) => q.id === this.app.view.selectedStructure);
+    if (!s) return '';
+    const K = STRUCTS[s.kind];
+    const crew = st.survivors.filter((g) => g.job === s.id).length;
+    const tags = [`<span class="tag">${s.kind === 'wall' ? `${Math.round(Math.hypot(s.x2! - s.x, s.y2! - s.y))} m` : 'Structure'}</span>`];
+    let body = '';
+    if (s.built < 1) {
+      tags.push('<span class="tag ember">Under construction</span>');
+      body += `<div class="kv"><span>Progress</span><b>${Math.round(s.built * 100)}%</b></div><div class="hpbar"><i style="width:${s.built * 100}%;background:var(--ember-2)"></i></div>`;
+      body += `<div class="kv"><span>Builders</span><b>${crew ? `${crew} working` : 'None right now'}</b></div>`;
+      body += `<div class="note">${crew ? 'Haven guards are building it.' : st.survivors.some((g) => g.squad === -1 && !g.joining) ? 'Guards build when no infected are close by.' : 'No one is at the haven to build it. Send someone home from a squad.'} About ${Math.round(workFor(s))} worker-seconds of work in total; engineers build faster.</div>`;
+    } else {
+      const f = Math.max(0, s.hp / K.hp);
+      body += `<div class="hpbar"><i style="width:${f * 100}%;background:${f > 0.5 ? 'var(--good)' : f > 0.25 ? 'var(--warn)' : 'var(--bad)'}"></i></div><div class="kv"><span>Condition</span><b>${Math.round(f * 100)}%</b></div>`;
+      body += `<div class="note">${K.desc}${s.kind === 'wall' || s.kind === 'trap' ? '' : ''} Damage is repaired with materials at dawn.</div>`;
+    }
+    const refund = refundOf(s);
+    const btn = `<button class="btn" data-act="dismantle">${I.close}${s.built < 1 ? 'Cancel' : 'Take down'} <small>+${refund} mat</small></button>`;
+    return `${this.head(K.name, s.built < 1 ? 'Construction site' : 'Haven defences')}<div class="tags">${tags.join('')}</div>${body}<div class="btns one">${btn}</div>`;
+  }
+
+  private propCard(st: GameState, rt: Runtime): string {
+    const pi = this.app.view.selectedProp;
+    if (st.salvaged.includes(pi)) return '';
+    const info = salvageInfo(rt, pi);
+    if (!info) return '';
+    const sq = this.app.view.selectedSquad;
+    const n = sq >= 0 ? squadMembers(st, sq).length : 0;
+    const body = `<div class="kv"><span>${I.mat} Materials</span><b>+${info.mat}</b></div>${info.fuel ? `<div class="kv"><span>${I.fuel} Fuel in the tank</span><b>+${info.fuel}</b></div>` : ''}<div class="kv"><span>Work</span><b>${info.work} worker-seconds</b></div>`;
+    return `${this.head(info.name, 'Too far gone to drive')}<div class="tags"><span class="tag">Salvage</span></div>${body}<div class="btns one"><button class="btn primary" data-act="scrap" ${n ? '' : 'disabled'}>${I.wrench}Scrap for parts</button></div>${this.squadChip(st)}<div class="note">The noise of cutting metal carries. Keep an eye out.</div>`;
   }
 
   private vehicleCard(st: GameState, id: number): string {
@@ -441,8 +522,12 @@ export class Ui {
     body += `<div class="kv"><span>Fuel stockpile</span><b>${Math.floor(st.res.fuel)} · range ≈ ${(range / 1000).toFixed(1)} km</b></div>`;
     let btns = '';
     const members = sq >= 0 ? squadMembers(st, sq) : [];
-    if (v.wreck) body += `<div class="note">Burnt out. Nothing left to salvage.</div>`;
-    else if (mine) {
+    const scrap = vehicleSalvageInfo(v);
+    const scrapBtn = `<button class="btn" data-act="scrap-veh" ${!members.length ? 'disabled' : ''}>${I.wrench}Scrap <small>+${scrap.mat} mat</small></button>`;
+    if (v.wreck) {
+      body += `<div class="note">Burnt out, but the frame is still worth some scrap.</div>`;
+      btns += scrapBtn;
+    } else if (mine) {
       const riding = members.some((m) => m.inside === VEH_SEAT + v.id);
       btns += riding ? `<button class="btn" data-act="veh-out">${I.door}Get out</button>` : `<button class="btn primary" data-act="veh-in">${I.car}Get in</button>`;
       btns += `<button class="btn" data-act="veh-leave">${I.close}Leave it</button>`;
@@ -451,10 +536,11 @@ export class Ui {
     } else {
       const cost = repairCost(st, v);
       btns += `<button class="btn primary" data-act="take" ${!members.length || (v.broken && st.res.mat < cost) ? 'disabled' : ''}>${I.car}${v.broken ? `Repair &amp; take <small>${cost} mat</small>` : 'Take vehicle'}</button>`;
+      btns += scrapBtn;
     }
     const note = v.wreck ? '' : `<div class="note">Squads drive on trips longer than a couple of blocks. Engines are loud, and you can run the infected down, but it damages the vehicle.</div>`;
     const btnCount = (btns.match(/class="btn/g) || []).length;
-    return `${this.head(K.name, v.wreck ? 'Wreck' : `${Math.round((v.hp / K.hp) * 100)}% condition`)}<div class="tags">${tags.join('')}</div>${body}${btns ? `<div class="btns ${btnCount === 1 ? 'one' : ''}">${btns}</div>` : ''}${v.wreck ? '' : this.squadChip(st)}${note}`;
+    return `${this.head(K.name, v.wreck ? 'Wreck' : `${Math.round((v.hp / K.hp) * 100)}% condition`)}<div class="tags">${tags.join('')}</div>${body}${btns ? `<div class="btns ${btnCount === 1 ? 'one' : ''}">${btns}</div>` : ''}${this.squadChip(st)}${note}`;
   }
 
   private buildSheet(st: GameState): string {
@@ -462,12 +548,14 @@ export class Ui {
     const items = (Object.keys(STRUCTS) as StructKind[])
       .map((k) => {
         const s = STRUCTS[k];
-        const cost = structCost(st, k);
-        const ok = st.res.mat >= cost;
-        return `<button class="build-item ${ok ? '' : 'no'}" data-act="place" data-kind="${k}"><div class="bi">${I[k]}</div><div><b>${s.name}</b><p>${s.desc}</p></div><div class="cost">${I.mat}${cost}</div></button>`;
+        const wall = k === 'wall';
+        const cost = wall ? structCost(st, 'wall', 50) : structCost(st, k);
+        const ok = st.res.mat >= (wall ? structCost(st, 'wall', 14) : cost);
+        return `<button class="build-item ${ok ? '' : 'no'}" data-act="place" data-kind="${k}"><div class="bi">${I[k]}</div><div><b>${s.name}</b><p>${s.desc}</p></div><div class="cost">${I.mat}${wall ? `${cost}<small>/50m</small>` : cost}</div></button>`;
       })
       .join('');
-    return `${this.head('Build', eng ? 'An engineer at the haven cuts costs by 20%.' : 'Structures must be placed near your haven.')}<div class="build-list">${items}</div>`;
+    const guards = st.survivors.filter((g) => g.squad === -1 && !g.joining).length;
+    return `${this.head('Build', `${guards ? `${guards} haven guard${guards > 1 ? 's' : ''} will build it` : 'No guards at the haven to build'}${eng ? ' · engineer discount -20%' : ''}`)}<div class="build-list">${items}</div>`;
   }
 
   private memberRow(m: Survivor, action: string): string {
@@ -586,6 +674,17 @@ export class Ui {
         } else if (o.drive === 'board' || o.t === 'vehicle') {
           status = 'To the vehicle';
           cls = 'busy';
+        } else if (o.t === 'demolish' && o.phase === 'work') {
+          prog = st.b[o.b!].demo ?? 0;
+          status = `Demolishing ${Math.round(prog * 100)}%`;
+          cls = 'busy';
+        } else if (o.t === 'salvage' && o.phase === 'work') {
+          prog = Math.min(1, (o.timer ?? 0) / (o.total || 1));
+          status = `Scrapping ${Math.round(prog * 100)}%`;
+          cls = 'busy';
+        } else if (o.t === 'salvage') {
+          status = 'To the wreck';
+          cls = 'busy';
         } else if (o.phase === 'inside') {
           prog = Math.min(1, (o.timer ?? 0) / (o.total || 1));
           const explored = st.b[o.b!].explored;
@@ -604,7 +703,10 @@ export class Ui {
           status = `To ${bname}`;
           cls = 'busy';
         } else if (riding) status = 'In the vehicle';
-      } else status = members.length ? 'Guarding' : 'Unguarded';
+      } else {
+        const builders = members.filter((m) => (m.job ?? -1) >= 0).length;
+        status = builders ? `Building (${builders})` : members.length ? 'Guarding' : 'Unguarded';
+      }
       const pips = members.map((m) => `<div class="pip"><i style="width:${Math.round((m.hp / m.maxHp) * 20) * 5}%"></i></div>`).join('');
       const k = `${status}|${cls}|${pips}|${prog.toFixed(2)}|${this.app.view.selectedSquad}`;
       if (this.squadKeys[idx] === k) return;
@@ -623,9 +725,19 @@ export class Ui {
     const v = this.app.view;
     if (v.placing) {
       const s = STRUCTS[v.placing];
-      const cost = structCost(st, v.placing);
-      const msg = v.ghost ? (v.ghostOk ? `Place <b>${s.name}</b> here?` : `<span class="msg bad">Can't build here</span>`) : `Tap near your haven to place <b>${s.name}</b>`;
-      const html = `<div class="msg">${msg}</div><button class="btn" data-act="place-cancel">${I.close}</button>${v.ghost && v.ghostOk ? `<button class="btn primary" data-act="place-ok">${I.check}Build <small>${cost}</small></button>` : ''}`;
+      let cost = structCost(st, v.placing);
+      let msg: string;
+      let ready = !!v.ghost && v.ghostOk;
+      if (v.placing === 'wall') {
+        const len = v.wallStart && v.ghost ? Math.hypot(v.ghost.x - v.wallStart.x, v.ghost.y - v.wallStart.y) : 0;
+        cost = structCost(st, 'wall', len);
+        if (!v.wallStart) msg = `Tap where the <b>wall</b> starts`;
+        else if (!v.ghost) msg = `Now tap where it ends (up to ${WALL_MAX} m)`;
+        else msg = v.ghostOk ? `<b>${Math.round(len)} m</b> of palisade` : `<span class="msg bad">${esc(this.app.placeError || "Can't build there")}</span>`;
+        ready = !!v.wallStart && !!v.ghost && v.ghostOk;
+        void wallCost;
+      } else msg = v.ghost ? (v.ghostOk ? `Place <b>${s.name}</b> here?` : `<span class="msg bad">${esc(this.app.placeError || "Can't build here")}</span>`) : `Tap near your haven to place <b>${s.name}</b>`;
+      const html = `<div class="msg">${msg}</div><button class="btn" data-act="place-cancel">${I.close}</button>${ready ? `<button class="btn primary" data-act="place-ok">${I.check}Build <small>${cost}</small></button>` : ''}`;
       if (this.placeKey !== html) {
         this.el.placebar.innerHTML = html;
         this.placeKey = html;
@@ -675,7 +787,7 @@ export class Ui {
         <button class="btn" data-act="howto">${I.info}How to play</button>
         <button class="btn" data-act="settings">${I.gear}Settings</button>
       </div>
-      <div class="foot">v0.3 prototype · pre-generated town map</div>
+      <div class="foot">v0.4 prototype · pre-generated town map</div>
     </div></div>`;
   }
 
@@ -691,6 +803,8 @@ export class Ui {
         ${tip(I.scout, 'Scout & scavenge', 'Scouting reveals supplies, infected and survivors. Scavenging brings everything back to your stockpile.')}
         ${tip(I.target, 'Roles matter', 'Soldiers fight, scouts move and see further, medics heal, engineers cut building costs, scavengers find more.')}
         ${tip(I.car, 'Vehicles', 'Repair abandoned cars and squads will drive longer trips. Driving burns fuel and makes noise.')}
+        ${tip(I.demolish, 'Demolish & scrap', 'Squads can tear down buildings and strip abandoned cars for materials. It takes time and the noise draws the infected.')}
+        ${tip(I.wall, 'Construction', 'Placed structures start as building sites. Haven guards build them; engineers work faster. Walls hold the infected back but let your people through.')}
         ${tip(I.claim, 'Grow the haven', 'Claim cleared buildings next to your haven for more beds. Rescued survivors move in and stand guard.')}
         ${tip(I.fortify, 'Fortify & build', 'Barricade haven buildings and build watchtowers, fire barrels, gardens, workshops and infirmaries.')}
         ${tip(I.moon, 'Nights are deadly', 'At 20:00 a horde marches on the haven. Light the dark so guards can see, and bring squads home.')}

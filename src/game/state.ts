@@ -27,14 +27,24 @@ export const ZKINDS = [
   { name: 'Brute', hp: 240, speed: 15, wander: 5, dmg: 20, cd: 1.5, r: 6.6 },
 ];
 
-export type StructKind = 'tower' | 'barrel' | 'garden' | 'workshop' | 'infirmary';
-export const STRUCTS: Record<StructKind, { name: string; cost: number; hp: number; desc: string; r: number }> = {
-  tower: { name: 'Watchtower', cost: 30, hp: 220, desc: 'Armed lookout. Shoots infected in range and lights the area. Uses ammo.', r: 9 },
-  barrel: { name: 'Fire Barrel', cost: 6, hp: 60, desc: 'Lights up the dark so your guards can see the horde coming.', r: 4 },
-  garden: { name: 'Garden Plot', cost: 15, hp: 80, desc: 'Grows +4 food every morning.', r: 13 },
-  workshop: { name: 'Workshop', cost: 35, hp: 160, desc: 'Turns 2 materials into 5 ammo every few hours of daylight.', r: 11 },
-  infirmary: { name: 'Infirmary Tent', cost: 25, hp: 120, desc: 'Survivors near the haven heal five times faster.', r: 11 },
+export type StructKind = 'tower' | 'barrel' | 'garden' | 'workshop' | 'infirmary' | 'wall' | 'trap';
+/** cost in materials; work = worker-seconds for haven guards to build it (walls: per 10 units of length). */
+export const STRUCTS: Record<StructKind, { name: string; cost: number; hp: number; desc: string; r: number; work: number }> = {
+  tower: { name: 'Watchtower', cost: 30, hp: 220, desc: 'Armed lookout. Shoots infected in range and lights the area. Uses ammo.', r: 9, work: 30 },
+  barrel: { name: 'Fire Barrel', cost: 6, hp: 60, desc: 'Lights up the dark so your guards can see the horde coming.', r: 4, work: 4 },
+  garden: { name: 'Garden Plot', cost: 15, hp: 80, desc: 'Grows +4 food every morning.', r: 13, work: 14 },
+  workshop: { name: 'Workshop', cost: 35, hp: 160, desc: 'Turns 2 materials into 5 ammo every few hours of daylight.', r: 11, work: 34 },
+  infirmary: { name: 'Infirmary Tent', cost: 25, hp: 120, desc: 'Survivors near the haven heal five times faster.', r: 11, work: 22 },
+  wall: { name: 'Palisade Wall', cost: 0, hp: 260, desc: 'Draw a line of sharpened stakes. Holds the infected back while your own people slip through the gaps.', r: 4, work: 1.6 },
+  trap: { name: 'Spike Trap', cost: 8, hp: 90, desc: 'Hidden spikes that wound any infected walking over them. Wears out with use.', r: 6, work: 6 },
 };
+
+export const WALL_MAX = 150;
+/** Materials for a wall of the given length (world units). */
+export const wallCost = (len: number) => Math.max(6, Math.round(len / 5));
+/** Worker-seconds to build a structure. */
+export const workFor = (s: { kind: StructKind; x: number; y: number; x2?: number; y2?: number }) =>
+  s.kind === 'wall' ? Math.max(6, (Math.hypot((s.x2 ?? s.x) - s.x, (s.y2 ?? s.y) - s.y) / 10) * STRUCTS.wall.work) : STRUCTS[s.kind].work;
 
 export const FORT_COST = [15, 30, 50];
 
@@ -107,6 +117,12 @@ export interface Survivor {
   repath: number;
   /** Walking to the haven to join it (rescued or reassigned). */
   joining?: boolean;
+  /** transient: fighting this tick */
+  eng?: boolean;
+  /** transient: hammering away at a job site this tick */
+  working?: boolean;
+  /** haven guard: structure id being built, or -1 */
+  job?: number;
 }
 
 export interface Zombie {
@@ -129,7 +145,7 @@ export interface Zombie {
   vy: number;
 }
 
-export type OrderType = 'idle' | 'move' | 'scout' | 'scavenge' | 'claim' | 'return' | 'vehicle';
+export type OrderType = 'idle' | 'move' | 'scout' | 'scavenge' | 'claim' | 'return' | 'vehicle' | 'demolish' | 'salvage';
 export interface Order {
   t: OrderType;
   x?: number;
@@ -137,10 +153,12 @@ export interface Order {
   b?: number;
   /** vehicle id for 'vehicle' orders */
   v?: number;
+  /** map prop index for 'salvage' orders on abandoned cars */
+  p?: number;
   /** driving stage when the squad uses its vehicle for this order */
   drive?: 'board' | 'drive';
   /** progress phase for building orders */
-  phase?: 'go' | 'clear' | 'inside' | 'done';
+  phase?: 'go' | 'clear' | 'inside' | 'work' | 'done';
   timer?: number;
   total?: number;
 }
@@ -160,6 +178,9 @@ export interface BState {
   infected: number;
   survivors: number;
   breached?: boolean;
+  /** demolition progress 0..1 (kept if the crew leaves) */
+  demo?: number;
+  demolished?: boolean;
 }
 
 export interface Structure {
@@ -167,9 +188,16 @@ export interface Structure {
   kind: StructKind;
   x: number;
   y: number;
+  /** wall end point */
+  x2?: number;
+  y2?: number;
   hp: number;
   cd: number;
   t: number;
+  /** construction progress 0..1; only finished structures work */
+  built: number;
+  /** materials paid, for refunds */
+  cost: number;
 }
 
 export interface Resources {
@@ -215,6 +243,8 @@ export interface GameState {
   fires: Vec[];
   vehicles: Vehicle[];
   weather: Weather;
+  /** map prop indices of cars that were scrapped */
+  salvaged: number[];
 }
 
 const NAMES = [
@@ -299,6 +329,7 @@ export function newGame(map: MapData, seed: number): GameState {
     fires: [],
     vehicles: [],
     weather: 'clear',
+    salvaged: [],
   };
   const used = new Set<string>();
   const door = hq.door;
@@ -388,5 +419,10 @@ export function migrate(st: GameState, map: MapData): GameState {
   for (const b of st.b) b.loot.fuel ??= 0;
   for (const s of st.survivors) s.role ??= roleFor(s.id);
   if (!st.vehicles) st.vehicles = createVehicles(map, () => st.nextId++);
+  st.salvaged ??= [];
+  for (const s of st.structures) {
+    s.built ??= 1;
+    s.cost ??= STRUCTS[s.kind].cost;
+  }
   return st;
 }

@@ -1,4 +1,4 @@
-import type { MapData } from './types';
+import type { MapData, Prop } from './types';
 import type { Rect, Vec } from '../core/math';
 import { inRiver, vehicleSpots } from './mapgen';
 
@@ -113,16 +113,43 @@ export class NavGrid {
         markRect({ x: p.x - p.r + 3, y: p.y - p.r + 3, w: p.r * 2 - 6, h: p.r * 2 - 6 }, 0, false);
         continue;
       }
-      const L = p.kind === 'bus' ? 40 : p.kind === 'truck' || p.kind === 'container' ? 28 : p.kind === 'firetruck' ? 32 : p.kind === 'dumpster' ? 10 : 15;
-      // approximate rotated vehicle with a few cells along its axis
-      const c = Math.cos(p.a);
-      const s = Math.sin(p.a);
-      for (let t = -L / 2 + 3; t <= L / 2 - 3; t += 5) {
-        const x = Math.floor((p.x + c * t) / CELL);
-        const y = Math.floor((p.y + s * t) / CELL);
-        if (x >= 0 && y >= 0 && x < this.w && y < this.h) this.blocked[y * this.w + x] = 1;
-      }
+      for (const i of this.propCells(p)) this.blocked[i] = 1;
     }
+  }
+
+  /** Cells a solid prop (vehicle, container...) occupies: a few cells along its axis. */
+  propCells(p: Prop): number[] {
+    const L = p.kind === 'bus' ? 40 : p.kind === 'truck' || p.kind === 'container' ? 28 : p.kind === 'firetruck' ? 32 : p.kind === 'dumpster' ? 10 : 15;
+    const c = Math.cos(p.a);
+    const s = Math.sin(p.a);
+    const out: number[] = [];
+    for (let t = -L / 2 + 3; t <= L / 2 - 3; t += 5) {
+      const x = Math.floor((p.x + c * t) / CELL);
+      const y = Math.floor((p.y + s * t) / CELL);
+      if (x >= 0 && y >= 0 && x < this.w && y < this.h) out.push(y * this.w + x);
+    }
+    return out;
+  }
+
+  /** Makes a scrapped prop walkable again. */
+  clearProp(p: Prop): void {
+    for (const i of this.propCells(p)) this.blocked[i] = 0;
+  }
+
+  /** Makes a demolished building's footprint walkable and see-through (rubble). */
+  clearRect(r: Rect): void {
+    const x0 = Math.max(0, Math.floor((r.x - 1) / CELL));
+    const y0 = Math.max(0, Math.floor((r.y - 1) / CELL));
+    const x1 = Math.min(this.w - 1, Math.floor((r.x + r.w + 1) / CELL));
+    const y1 = Math.min(this.h - 1, Math.floor((r.y + r.h + 1) / CELL));
+    for (let y = y0; y <= y1; y++)
+      for (let x = x0; x <= x1; x++) {
+        const cx = x * CELL + CELL / 2;
+        const cy = y * CELL + CELL / 2;
+        if (cx < r.x - 1 || cx > r.x + r.w + 1 || cy < r.y - 1 || cy > r.y + r.h + 1) continue;
+        this.blocked[y * this.w + x] = 0;
+        this.opaque[y * this.w + x] = 0;
+      }
   }
 
   idx(x: number, y: number): number {
@@ -270,7 +297,7 @@ export class NavGrid {
    * Dijkstra distance field from a set of target cells (used to steer hordes).
    * Returns distance in cell units (Infinity where unreachable).
    */
-  flowField(targets: number[]): Float32Array {
+  flowField(targets: number[], penalty?: Int32Array): Float32Array {
     const n = this.w * this.h;
     const dist = new Float32Array(n).fill(Infinity);
     const prio = new Float64Array(n);
@@ -294,7 +321,7 @@ export class NavGrid {
         const ni = ny * W + nx;
         if (this.blocked[ni]) continue;
         if (k >= 4 && (this.blocked[cy * W + nx] || this.blocked[ny * W + cx])) continue;
-        const nd = d + COST[k];
+        const nd = d + COST[k] + (penalty && penalty[ni] >= 0 ? 25 : 0);
         if (nd < dist[ni]) {
           dist[ni] = nd;
           prio[ni] = nd;

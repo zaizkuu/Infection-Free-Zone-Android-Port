@@ -48,6 +48,10 @@ export const I = {
   music: svg('<path d="M9 18V5l11-2v13"/><circle cx="6" cy="18" r="3"/><circle cx="17" cy="16" r="3"/>'),
   vibrate: svg('<rect x="7" y="3" width="10" height="18" rx="2"/><path d="M3 8v8M21 8v8"/>'),
   door: svg('<path d="M14 4h5v16h-5"/><path d="M10 8l-4 4 4 4M6 12h10"/>'),
+  wall: svg('<path d="M5 21V8l2-3 2 3v13M11 21V8l2-3 2 3v13M17 21V8l2-3 2 3v13"/><path d="M3 12h18M3 17h18"/>'),
+  trap: svg('<path d="M3 20h18"/><path d="M5 20l2-8 2 8M10 20l2-10 2 10M15 20l2-8 2 8"/>'),
+  demolish: svg('<path d="M4 21V9l6-4 6 4v3"/><path d="M3 21h9"/><path d="M8 13h2M8 17h2"/><path d="M14 21l2-2 2 1 1-3 2-1M15 15l2 1M19 13l1 2"/>'),
+  wrench: svg('<path d="M14.7 6.3a4 4 0 0 0-5.4 5.4L3 18l3 3 6.3-6.3a4 4 0 0 0 5.4-5.4l-2.6 2.6-2.4-.6-.6-2.4z"/>'),
   flame: svg('<path d="M12 22c-4 0-7-2.6-7-6.3C5 11 9.5 9.6 10 4c3.4 2 9 6.4 9 11.7 0 3.7-3 6.3-7 6.3z"/><path d="M12 22c-1.8 0-3-1.2-3-2.8 0-2 1.8-2.8 2.4-4.7 1.6 1.1 3.6 2.6 3.6 4.7 0 1.6-1.2 2.8-3 2.8z"/>'),
 };
 

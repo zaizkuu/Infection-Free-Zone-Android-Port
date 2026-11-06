@@ -7,7 +7,7 @@ import '@fontsource/barlow/600.css';
 import './ui/styles.css';
 
 import { Capacitor } from '@capacitor/core';
-import { generateMap } from './world/mapgen';
+import { generateMap, vehicleSpots } from './world/mapgen';
 import { NavGrid, CELL } from './world/nav';
 import type { MapData } from './world/types';
 import { Camera } from './render/camera';
@@ -18,8 +18,8 @@ import { Music } from './audio/music';
 import { Ui, type App } from './ui/ui';
 import { initPlatform, buzz } from './platform';
 import { clearSave, hasSave, loadGame, loadPrefs, saveGame, savePrefs, type Prefs } from './save';
-import { DAY_LEN, SQUAD_COLORS, STRUCTS, VEH_SEAT, migrate, nightness, newGame, type GameState, type OrderType, type StructKind } from './game/state';
-import { assignSurvivor, build, canBuildAt, createRuntime, fortify, orderSquad, populate, releaseVehicle, squadMembers, step, stepFx, syncFog, unloadAll, vehicleOf, type Runtime } from './game/sim';
+import { DAY_LEN, SQUAD_COLORS, STRUCTS, VEH_SEAT, WALL_MAX, migrate, nightness, newGame, type GameState, type OrderType, type StructKind } from './game/state';
+import { assignSurvivor, build, canBuildAt, canBuildWall, createRuntime, dismantle, fortify, orderSquad, populate, releaseVehicle, salvageInfo, squadMembers, step, stepFx, syncFog, unloadAll, vehicleOf, type Runtime } from './game/sim';
 
 /** The town is generated from a fixed seed, so every game uses the same pre-generated map. */
 const SEED = 1337;
@@ -29,9 +29,10 @@ class Game implements App {
   st: GameState | null = null;
   rt: Runtime | null = null;
   map: MapData;
-  view: ViewState = { selectedSquad: 0, selectedBuilding: -1, selectedVehicle: -1, placing: null, ghost: null, ghostOk: false, markers: [], time: 0 };
+  view: ViewState = { selectedSquad: 0, selectedBuilding: -1, selectedVehicle: -1, selectedStructure: -1, selectedProp: -1, placing: null, wallStart: null, ghost: null, ghostOk: false, markers: [], time: 0 };
   paused = false;
   prefs: Prefs;
+  placeError = '';
   mode: 'title' | 'play' = 'title';
 
   private canvas: HTMLCanvasElement;
@@ -40,6 +41,7 @@ class Game implements App {
   private renderer: WorldRenderer;
   private input: Input;
   private sfx = new Sfx();
+  private vehicleProps: Set<number> | null = null;
   private music = new Music();
   private tension = 0;
   private tensionTimer = 0;
@@ -132,8 +134,11 @@ class Game implements App {
   private freshRuntime(st: GameState): Runtime {
     const nav = new NavGrid(this.map);
     const rt = createRuntime(this.map, nav, st);
+    // the world as this save left it: demolished buildings and scrapped cars
+    st.b.forEach((b, i) => b.demolished && nav.clearRect(this.map.buildings[i]));
+    for (const pi of st.salvaged) nav.clearProp(this.map.props[pi]);
     for (const s of st.structures) {
-      if (s.kind === 'tower' || s.kind === 'workshop' || s.kind === 'infirmary') {
+      if (s.built >= 1 && (s.kind === 'tower' || s.kind === 'workshop' || s.kind === 'infirmary')) {
         const r = STRUCTS[s.kind].r - 2;
         for (let dx = -r; dx <= r; dx += CELL / 2) for (let dy = -r; dy <= r; dy += CELL / 2) nav.blocked[nav.idx(s.x + dx, s.y + dy)] = 1;
       }
@@ -148,9 +153,10 @@ class Game implements App {
     const rt = this.freshRuntime(st);
     rt.explored.fill(1);
     const hq = this.map.buildings[this.map.hqId];
-    st.structures.push({ id: 900, kind: 'tower', x: hq.x - 26, y: hq.y + hq.h + 30, hp: 220, cd: 0, t: 0 });
-    st.structures.push({ id: 901, kind: 'barrel', x: hq.x + hq.w + 24, y: hq.y + hq.h + 16, hp: 60, cd: 0, t: 0 });
-    st.structures.push({ id: 902, kind: 'barrel', x: hq.x + 10, y: hq.y - 22, hp: 60, cd: 0, t: 0 });
+    st.structures.push({ id: 900, kind: 'tower', x: hq.x - 26, y: hq.y + hq.h + 30, hp: 220, cd: 0, t: 0, built: 1, cost: 30 });
+    st.structures.push({ id: 901, kind: 'barrel', x: hq.x + hq.w + 24, y: hq.y + hq.h + 16, hp: 60, cd: 0, t: 0, built: 1, cost: 6 });
+    st.structures.push({ id: 902, kind: 'barrel', x: hq.x + 10, y: hq.y - 22, hp: 60, cd: 0, t: 0, built: 1, cost: 6 });
+    this.renderer.mapR.setWorldState([], []);
     st.b[this.map.hqId].fort = 2;
     populate(st, rt, 260, 260);
     st.res.ammo = 9999;
@@ -190,10 +196,14 @@ class Game implements App {
     this.paused = false;
     this.endTimer = -1;
     this.acc = 0;
-    this.view = { selectedSquad: 0, selectedBuilding: -1, selectedVehicle: -1, placing: null, ghost: null, ghostOk: false, markers: [], time: 0 };
+    this.view = { selectedSquad: 0, selectedBuilding: -1, selectedVehicle: -1, selectedStructure: -1, selectedProp: -1, placing: null, wallStart: null, ghost: null, ghostOk: false, markers: [], time: 0 };
     this.ui.hideScreens();
     this.ui.closePanel();
     this.ui.showHud(true);
+    this.renderer.mapR.setWorldState(
+      st.b.flatMap((b, i) => (b.demolished ? [i] : [])),
+      st.salvaged,
+    );
     const hq = this.map.buildings[this.map.hqId];
     this.cam.zoom = 1.35;
     this.cam.x = hq.x + hq.w / 2;
@@ -317,16 +327,21 @@ class Game implements App {
   startPlacing(k: StructKind): void {
     this.view.placing = k;
     this.view.ghost = null;
+    this.view.wallStart = null;
+    this.placeError = '';
     this.view.selectedBuilding = -1;
     this.ui.update();
   }
 
   confirmPlace(): void {
-    if (!this.st || !this.rt || !this.view.placing || !this.view.ghost) return;
-    if (build(this.st, this.rt, this.view.placing, this.view.ghost.x, this.view.ghost.y)) {
+    const v = this.view;
+    if (!this.st || !this.rt || !v.placing || !v.ghost) return;
+    const ok = v.placing === 'wall' ? !!v.wallStart && build(this.st, this.rt, 'wall', v.wallStart.x, v.wallStart.y, v.ghost.x, v.ghost.y) : build(this.st, this.rt, v.placing, v.ghost.x, v.ghost.y);
+    if (ok) {
       this.buzz('heavy');
-      this.view.placing = null;
-      this.view.ghost = null;
+      v.placing = null;
+      v.ghost = null;
+      v.wallStart = null;
     }
     this.ui.update();
   }
@@ -334,6 +349,51 @@ class Game implements App {
   cancelPlace(): void {
     this.view.placing = null;
     this.view.ghost = null;
+    this.view.wallStart = null;
+    this.ui.update();
+  }
+
+  /** Updates the placement preview for a point the player is pointing at. */
+  private aim(w: { x: number; y: number }): void {
+    const st = this.st!;
+    const rt = this.rt!;
+    const v = this.view;
+    if (v.placing === 'wall') {
+      if (!v.wallStart) {
+        v.ghost = null;
+        return;
+      }
+      let ex = w.x;
+      let ey = w.y;
+      const len = Math.hypot(ex - v.wallStart.x, ey - v.wallStart.y);
+      if (len > WALL_MAX) {
+        ex = v.wallStart.x + ((ex - v.wallStart.x) / len) * WALL_MAX;
+        ey = v.wallStart.y + ((ey - v.wallStart.y) / len) * WALL_MAX;
+      }
+      v.ghost = { x: ex, y: ey };
+      this.placeError = canBuildWall(st, rt, v.wallStart.x, v.wallStart.y, ex, ey) ?? '';
+    } else if (v.placing) {
+      v.ghost = w;
+      this.placeError = canBuildAt(st, rt, v.placing, w.x, w.y) ?? '';
+    }
+    v.ghostOk = !this.placeError;
+  }
+
+  salvage(t: { p?: number; v?: number }): void {
+    if (!this.st || !this.rt) return;
+    const sq = this.view.selectedSquad;
+    if (sq < 0 || !squadMembers(this.st, sq).length) return;
+    orderSquad(this.st, this.rt, sq, { t: 'salvage', p: t.p, v: t.v });
+    const x = t.p !== undefined ? this.map.props[t.p].x : this.st.vehicles.find((q) => q.id === t.v)?.x;
+    const y = t.p !== undefined ? this.map.props[t.p].y : this.st.vehicles.find((q) => q.id === t.v)?.y;
+    if (x !== undefined && y !== undefined) this.view.markers.push({ x, y, t: 0, c: SQUAD_COLORS[sq] });
+    this.buzz();
+    this.ui.update();
+  }
+
+  dismantle(id: number): void {
+    if (!this.st || !this.rt) return;
+    dismantle(this.st, this.rt, id);
     this.ui.update();
   }
 
@@ -347,9 +407,7 @@ class Game implements App {
 
   private hover(sx: number, sy: number): void {
     if (this.mode !== 'play' || !this.view.placing || !this.st || !this.rt) return;
-    const w = this.cam.toWorld(sx, sy);
-    this.view.ghost = w;
-    this.view.ghostOk = !canBuildAt(this.st, this.rt, this.view.placing, w.x, w.y);
+    this.aim(this.cam.toWorld(sx, sy));
   }
 
   private tap(sx: number, sy: number): void {
@@ -358,8 +416,11 @@ class Game implements App {
     const rt = this.rt;
     const w = this.cam.toWorld(sx, sy);
     if (this.view.placing) {
-      this.view.ghost = w;
-      this.view.ghostOk = !canBuildAt(st, rt, this.view.placing, w.x, w.y);
+      if (this.view.placing === 'wall' && !this.view.wallStart) {
+        this.view.wallStart = w;
+        this.view.ghost = null;
+        this.placeError = '';
+      } else this.aim(w);
       this.ui.update();
       return;
     }
@@ -393,6 +454,49 @@ class Game implements App {
       this.view.selectedVehicle = vbest;
       this.view.selectedBuilding = -1;
       this.ui.openPanel('vehicle');
+      this.click();
+      return;
+    }
+    // structures (walls by distance to the segment)
+    let sbest = -1;
+    let sd = 10 / this.cam.zoom + 4;
+    for (const s of st.structures) {
+      let d: number;
+      if (s.kind === 'wall') {
+        const x2 = s.x2!;
+        const y2 = s.y2!;
+        const L2 = (x2 - s.x) ** 2 + (y2 - s.y) ** 2 || 1;
+        const t = Math.max(0, Math.min(1, ((w.x - s.x) * (x2 - s.x) + (w.y - s.y) * (y2 - s.y)) / L2));
+        d = Math.hypot(w.x - (s.x + (x2 - s.x) * t), w.y - (s.y + (y2 - s.y) * t));
+      } else d = Math.hypot(w.x - s.x, w.y - s.y) - STRUCTS[s.kind].r;
+      if (d < sd) {
+        sd = d;
+        sbest = s.id;
+      }
+    }
+    if (sbest >= 0) {
+      this.view.selectedStructure = sbest;
+      this.view.selectedBuilding = -1;
+      this.ui.openPanel('structure');
+      this.click();
+      return;
+    }
+    // abandoned cars that can be scrapped
+    if (!this.vehicleProps) this.vehicleProps = new Set(vehicleSpots(this.map));
+    let pbest = -1;
+    let pd = 11 / this.cam.zoom + 5;
+    this.map.props.forEach((p, i) => {
+      if (this.vehicleProps!.has(i)) return;
+      const d = Math.hypot(p.x - w.x, p.y - w.y);
+      if (d >= pd || !salvageInfo(rt, i) || st.salvaged.includes(i)) return;
+      if (!rt.explored[Math.floor(p.y / 40) * rt.fogW + Math.floor(p.x / 40)]) return;
+      pd = d;
+      pbest = i;
+    });
+    if (pbest >= 0) {
+      this.view.selectedProp = pbest;
+      this.view.selectedBuilding = -1;
+      this.ui.openPanel('prop');
       this.click();
       return;
     }
@@ -506,6 +610,10 @@ class Game implements App {
         this.ui.banner(e.title, e.sub, e.tone);
         if (e.tone === 'bad') this.buzz('heavy');
       } else if (e.k === 'save') this.save();
+      else if (e.k === 'world') {
+        if (e.building !== undefined) this.renderer.mapR.markDemolished(e.building);
+        if (e.prop !== undefined) this.renderer.mapR.hideProp(e.prop);
+      }
       else if (e.k === 'sfx') {
         let vol = 1;
         if (e.x || e.y) {

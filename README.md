@@ -10,7 +10,7 @@ The game is built with TypeScript and HTML5 Canvas and packaged as a native Andr
 
 ## Install on your phone
 
-1. On your Android phone, open this repository on GitHub and download [`releases/EmberHaven-0.3.0-debug.apk`](releases/EmberHaven-0.3.0-debug.apk). Tap **Download raw file**.
+1. On your Android phone, open this repository on GitHub and download [`releases/EmberHaven-0.4.0-debug.apk`](releases/EmberHaven-0.4.0-debug.apk). Tap **Download raw file**.
 2. Open the downloaded file. If Android asks, allow your browser or file manager to **install unknown apps**.
 3. Tap **Install** and launch **Ember Haven**. The game runs in landscape.
 
@@ -25,7 +25,9 @@ Every push to the repository also builds a fresh APK through GitHub Actions. You
 | **Command squads** | Tap a squad card (Alpha, Bravo, Charlie) to select it. Tap the ground to move it, or tap a building for orders. Tap the selected card again to assign or send home members. |
 | **Scout and scavenge** | Scouting reveals what's inside a building: supplies, infected and survivors. Scavenging brings everything back to your stockpile. Infected hiding inside burst out when you arrive. |
 | **Grow the haven** | Claim cleared buildings next to your haven for more beds. Rescued survivors walk to the haven and stand guard. |
-| **Fortify and build** | Barricade haven buildings (planks, then sandbags, then steel). Build watchtowers, fire barrels, gardens, workshops and infirmary tents. |
+| **Fortify and build** | Barricade haven buildings (planks, then sandbags, then steel). Placed structures start as construction sites that your haven guards build when no infected are close (engineers work faster). Choose from watchtowers, fire barrels, gardens, workshops, infirmary tents, spike traps and palisade walls. |
+| **Walls and traps** | Draw a palisade wall with two taps (up to 150 m). Walls stop the infected, who have to break through, while your own people slip through the gaps. Spike traps wound anything that walks over them and wear out with use. Tap any structure to check it, cancel it, or take it down for a partial refund. Damaged defences are repaired with materials at dawn. |
+| **Demolish and scrap** | Squads can tear down any building except your HQ for materials, and bigger and sturdier buildings give more. The crew works around the outside, the noise draws the infected, and progress is kept if they leave, so you can come back and finish. Supplies and survivors inside are taken out first, and the lot becomes buildable rubble. Squads can also strip abandoned cars, wrecks and spare vehicles for materials and fuel. |
 | **Nights** | At 20:00 a horde marches on the haven from one or more directions. It gets bigger every night. Light the dark so your guards can see, and bring your squads home. |
 | **Roles** | Every survivor has a role. Soldiers hit harder and take more punishment. Scouts move faster, see further and scout quickly. Medics heal anyone near them. Engineers at the haven make building and barricades 20% cheaper and improve repairs and workshops. Scavengers make their squad scavenge faster and find extra supplies. Tap a squad card to choose exactly who goes out. |
 | **Vehicles** | Abandoned cars, a police cruiser and a delivery van are scattered around town. Repair one with materials and take it, and that squad drives any trip longer than a couple of blocks. Driving burns fuel (found at gas stations, farms and depots), makes noise, and lets you run the infected down, though that damages the vehicle. |

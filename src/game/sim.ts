@@ -14,8 +14,11 @@ import {
   STRUCTS,
   VEHICLES,
   VEH_SEAT,
+  WALL_MAX,
   WEATHER,
   ZKINDS,
+  wallCost,
+  workFor,
   capacity,
   hourOf,
   isNight,
@@ -24,6 +27,7 @@ import {
   type GameState,
   type Order,
   type StructKind,
+  type Structure,
   type Survivor,
   type Vehicle,
   type Weather,
@@ -37,7 +41,8 @@ export type GameEvent =
   | { k: 'toast'; text: string; tone: Tone }
   | { k: 'banner'; title: string; sub: string; tone: Tone }
   | { k: 'sfx'; name: SfxName; x: number; y: number }
-  | { k: 'save' };
+  | { k: 'save' }
+  | { k: 'world'; building?: number; prop?: number };
 export type SfxName = 'pistol' | 'rifle' | 'melee' | 'hit' | 'zdie' | 'sdie' | 'groan' | 'alarm' | 'build' | 'loot' | 'door' | 'dawn' | 'tower' | 'engine' | 'crash';
 
 export interface Tracer {
@@ -97,6 +102,9 @@ export interface Runtime {
   hordeTimer: number;
   attackAlert: number;
   survById: Map<number, Survivor>;
+  /** per nav cell: id of a finished wall standing there, or -1 */
+  wallAt: Int32Array;
+  wallsDirty: boolean;
 }
 
 const ZCELL = 50;
@@ -136,6 +144,8 @@ export function createRuntime(map: MapData, nav: NavGrid, st: GameState): Runtim
     hordeTimer: 0,
     attackAlert: 0,
     survById: new Map(),
+    wallAt: new Int32Array(nav.w * nav.h).fill(-1),
+    wallsDirty: true,
   };
 }
 
@@ -161,8 +171,52 @@ export function fortCost(st: GameState, level: number): number {
   return Math.round(FORT_COST[level] * (engineerAtHaven(st) ? 0.8 : 1));
 }
 
-export function structCost(st: GameState, kind: StructKind): number {
-  return Math.round(STRUCTS[kind].cost * (engineerAtHaven(st) ? 0.8 : 1));
+export function structCost(st: GameState, kind: StructKind, len = 0): number {
+  const base = kind === 'wall' ? wallCost(len) : STRUCTS[kind].cost;
+  return Math.round(base * (engineerAtHaven(st) ? 0.8 : 1));
+}
+
+// ---- demolition & salvage numbers ----------------------------------------------
+
+const DEMO_MUL: Partial<Record<string, number>> = { warehouse: 1.25, factory: 1.3, barn: 1.15, church: 1.2, apartment: 1.15, office: 1.1, school: 1.1, hospital: 1.2, supermarket: 1.15, police: 1.1 };
+
+/** Materials a building yields when torn down, and the worker-seconds it takes. */
+export function demolishInfo(rt: Runtime, id: number): { mat: number; work: number } {
+  const d = rt.map.buildings[id];
+  const area = d.w * d.h;
+  return { mat: Math.round(5 + Math.sqrt(area) * 0.6 * (DEMO_MUL[d.kind] ?? 1)), work: Math.round(area / 55 + d.wallH * 1.5) };
+}
+
+export function canDemolish(st: GameState, rt: Runtime, id: number): string | null {
+  if (id === rt.map.hqId) return 'You can\'t tear down your own HQ';
+  if (st.b[id].demolished) return 'Already rubble';
+  return null;
+}
+
+const SALVAGE_KINDS = new Set(['car', 'police', 'truck', 'bus', 'firetruck']);
+
+/** What scrapping an abandoned car (map prop) yields. */
+export function salvageInfo(rt: Runtime, pi: number): { mat: number; fuel: number; work: number; name: string } | null {
+  const p = rt.map.props[pi];
+  if (!p || !SALVAGE_KINDS.has(p.kind)) return null;
+  const burnt = p.c === '#2a2522';
+  const h = (n: number) => hash01(pi, n);
+  if (burnt) return { mat: 4 + Math.floor(h(1) * 3), fuel: 0, work: 8, name: 'Burnt-out wreck' };
+  if (p.kind === 'car' || p.kind === 'police') return { mat: 6 + Math.floor(h(1) * 4), fuel: 1 + Math.floor(h(2) * 3), work: 8, name: p.kind === 'police' ? 'Abandoned police car' : 'Abandoned car' };
+  if (p.kind === 'bus') return { mat: 14 + Math.floor(h(1) * 5), fuel: 2 + Math.floor(h(2) * 3), work: 18, name: 'Abandoned bus' };
+  return { mat: 10 + Math.floor(h(1) * 5), fuel: 2 + Math.floor(h(2) * 3), work: 14, name: p.kind === 'firetruck' ? 'Fire engine' : 'Abandoned truck' };
+}
+
+export function vehicleSalvageInfo(v: Vehicle): { mat: number; fuel: number; work: number } {
+  if (v.wreck) return { mat: 6, fuel: 0, work: 8 };
+  return { mat: v.kind === 'van' ? 16 : v.kind === 'cruiser' ? 12 : 10, fuel: 2, work: 10 };
+}
+
+function hash01(a: number, b: number): number {
+  let h = (Math.imul(a | 0, 374761393) + Math.imul(b | 0, 668265263)) | 0;
+  h = Math.imul(h ^ (h >>> 13), 1274126177);
+  h ^= h >>> 16;
+  return (h >>> 0) / 4294967296;
 }
 
 export function repairCost(st: GameState, v: Vehicle): number {
@@ -331,6 +385,10 @@ export function orderSquad(st: GameState, rt: Runtime, squad: number, order: Ord
   } else if (order.b !== undefined) {
     const b = rt.map.buildings[order.b];
     pathMembers(rt, members, b.door.x, b.door.y);
+  } else if (order.t === 'salvage') {
+    _st = st;
+    const t = salvageTarget(rt, order);
+    if (t) pathMembers(rt, members, t.x, t.y);
   }
   sfx(rt, 'door', members[0].x, members[0].y);
 }
@@ -339,7 +397,18 @@ function orderDest(rt: Runtime, o: Order): Vec | null {
   if (o.t === 'move') return { x: o.x!, y: o.y! };
   if (o.t === 'return') return hq(rt).door;
   if (o.b !== undefined) return rt.map.buildings[o.b].door;
+  if (o.t === 'salvage') return salvageTarget(rt, o);
   return null;
+}
+
+let _st: GameState | null = null; // set each step so helpers can look up vehicles
+function salvageTarget(rt: Runtime, o: Order): Vec | null {
+  if (o.p !== undefined) {
+    const p = rt.map.props[o.p];
+    return p ? rt.nav.nearestFree(p.x, p.y + 8, 4) : null;
+  }
+  const v = _st?.vehicles.find((q) => q.id === o.v);
+  return v ? rt.nav.nearestFree(v.x, v.y + 8, 4) : null;
 }
 
 function startDrive(_st: GameState, rt: Runtime, v: Vehicle, dest: Vec): void {
@@ -508,6 +577,7 @@ function rescue(st: GameState, rt: Runtime, id: number): void {
 }
 
 function updateSquads(st: GameState, rt: Runtime, dt: number): void {
+  for (const s of st.survivors) s.working = false;
   for (const sq of st.squads) {
     const o = sq.order;
     const members = squadMembers(st, sq.id);
@@ -598,6 +668,10 @@ function updateSquads(st: GameState, rt: Runtime, dt: number): void {
       continue;
     }
     if (o.t === 'idle' || o.phase === 'done') continue;
+    if (o.t === 'salvage') {
+      updateSalvage(st, rt, sq.id, members, dt);
+      continue;
+    }
     if (o.t === 'move' || o.t === 'return') {
       if (members.every((m) => !m.path || !m.path.length)) sq.order = { t: 'idle' };
       continue;
@@ -625,14 +699,20 @@ function updateSquads(st: GameState, rt: Runtime, dt: number): void {
           sfx(rt, 'groan', bd.door.x, bd.door.y);
           bs.infected = 0;
           o.phase = 'clear';
-        } else enterBuilding(st, rt, sq.id, members);
+        } else if (o.t === 'demolish') startDemolition(st, rt, sq.id, members);
+        else enterBuilding(st, rt, sq.id, members);
       }
     } else if (o.phase === 'clear') {
       let threats = 0;
       forZombiesNear(rt, bd.door.x, bd.door.y, 110, (z) => {
         if (z.mode === 1 || dist(z.x, z.y, bd.door.x, bd.door.y) < 60) threats++;
       });
-      if (threats === 0) enterBuilding(st, rt, sq.id, members);
+      if (threats === 0) {
+        if (o.t === 'demolish') startDemolition(st, rt, sq.id, members);
+        else enterBuilding(st, rt, sq.id, members);
+      }
+    } else if (o.phase === 'work') {
+      workDemolition(st, rt, sq.id, members, dt);
     } else if (o.phase === 'inside') {
       o.timer = (o.timer ?? 0) + dt;
       if (o.timer >= (o.total ?? 1)) {
@@ -732,35 +812,370 @@ export function fortify(st: GameState, rt: Runtime, id: number): boolean {
   return true;
 }
 
+export function canBuildWall(st: GameState, rt: Runtime, x1: number, y1: number, x2: number, y2: number): string | null {
+  const len = Math.hypot(x2 - x1, y2 - y1);
+  if (len < 14) return 'Drag the wall out a little further';
+  if (len > WALL_MAX + 0.5) return 'That wall is too long';
+  const cost = structCost(st, 'wall', len);
+  if (st.res.mat < cost) return `Need ${cost} materials`;
+  if (distToBase(st, rt, x1, y1) > BUILD_RANGE || distToBase(st, rt, x2, y2) > BUILD_RANGE) return 'Too far from your haven';
+  for (let t = 0; t <= len; t += 4) {
+    const x = x1 + ((x2 - x1) * t) / len;
+    const y = y1 + ((y2 - y1) * t) / len;
+    if (rt.nav.isBlocked(x, y)) return 'Something is in the way';
+  }
+  return null;
+}
+
 export function canBuildAt(st: GameState, rt: Runtime, kind: StructKind, x: number, y: number): string | null {
   const r = STRUCTS[kind].r;
   if (st.res.mat < structCost(st, kind)) return `Need ${structCost(st, kind)} materials`;
   if (distToBase(st, rt, x, y) > BUILD_RANGE) return 'Too far from your haven';
   for (let dx = -r; dx <= r; dx += CELL / 2)
     for (let dy = -r; dy <= r; dy += CELL / 2) if (rt.nav.isBlocked(x + dx, y + dy)) return 'Something is in the way';
-  for (const s of st.structures) if (dist(s.x, s.y, x, y) < STRUCTS[s.kind].r + r + 3) return 'Too close to another structure';
+  for (const s of st.structures) if (s.kind !== 'wall' && dist(s.x, s.y, x, y) < STRUCTS[s.kind].r + r + 3) return 'Too close to another structure';
   return null;
 }
 
-export function build(st: GameState, rt: Runtime, kind: StructKind, x: number, y: number): boolean {
-  const why = canBuildAt(st, rt, kind, x, y);
+/** Places a construction site; haven guards then build it. Materials are paid up front. */
+export function build(st: GameState, rt: Runtime, kind: StructKind, x: number, y: number, x2?: number, y2?: number): boolean {
+  const wall = kind === 'wall' && x2 !== undefined && y2 !== undefined;
+  const why = wall ? canBuildWall(st, rt, x, y, x2!, y2!) : canBuildAt(st, rt, kind, x, y);
   if (why) {
     toast(rt, why, 'warn');
     return false;
   }
-  st.res.mat -= structCost(st, kind);
-  st.structures.push({ id: st.nextId++, kind, x, y, hp: STRUCTS[kind].hp, cd: 0, t: 0 });
-  st.stats.built++;
-  if (kind === 'tower' || kind === 'workshop' || kind === 'infirmary') {
-    // solid structures block movement
-    const r = STRUCTS[kind].r - 2;
-    for (let dx = -r; dx <= r; dx += CELL / 2) for (let dy = -r; dy <= r; dy += CELL / 2) rt.nav.blocked[rt.nav.idx(x + dx, y + dy)] = 1;
+  const cost = wall ? structCost(st, 'wall', Math.hypot(x2! - x, y2! - y)) : structCost(st, kind);
+  st.res.mat -= cost;
+  const s: Structure = { id: st.nextId++, kind, x, y, hp: STRUCTS[kind].hp * 0.25, cd: 0, t: 0, built: 0, cost };
+  if (wall) {
+    s.x2 = x2;
+    s.y2 = y2;
   }
-  rt.flowDirty = true;
-  toast(rt, `${STRUCTS[kind].name} built.`, 'good');
-  sfx(rt, 'build', x, y);
-  for (let i = 0; i < 14; i++) spark(rt, x + rt.rng.range(-10, 10), y + rt.rng.range(-10, 10), '#ffcc80');
+  st.structures.push(s);
+  const guards = st.survivors.some((g) => g.squad === -1 && !g.joining);
+  toast(rt, guards ? `${STRUCTS[kind].name} site marked. Haven guards will build it.` : `${STRUCTS[kind].name} site marked, but no one is at the haven to build it.`, guards ? 'info' : 'warn');
+  sfx(rt, 'door', x, y);
   return true;
+}
+
+const SOLID = new Set<StructKind>(['tower', 'workshop', 'infirmary']);
+
+function completeStructure(st: GameState, rt: Runtime, s: Structure): void {
+  s.built = 1;
+  s.hp = STRUCTS[s.kind].hp;
+  st.stats.built++;
+  if (SOLID.has(s.kind)) {
+    const r = STRUCTS[s.kind].r - 2;
+    for (let dx = -r; dx <= r; dx += CELL / 2) for (let dy = -r; dy <= r; dy += CELL / 2) rt.nav.blocked[rt.nav.idx(s.x + dx, s.y + dy)] = 1;
+  }
+  if (s.kind === 'wall') rt.wallsDirty = true;
+  rt.flowDirty = true;
+  for (const g of st.survivors) if (g.job === s.id) g.job = -1;
+  const cx = s.kind === 'wall' ? (s.x + s.x2!) / 2 : s.x;
+  const cy = s.kind === 'wall' ? (s.y + s.y2!) / 2 : s.y;
+  toast(rt, `${STRUCTS[s.kind].name} finished.`, 'good');
+  sfx(rt, 'build', cx, cy);
+  for (let i = 0; i < 14; i++) spark(rt, cx + rt.rng.range(-10, 10), cy + rt.rng.range(-10, 10), '#ffcc80');
+}
+
+/** Player tears down one of their own structures for a partial refund. */
+export function dismantle(st: GameState, rt: Runtime, id: number): void {
+  const s = st.structures.find((q) => q.id === id);
+  if (!s) return;
+  const refund = s.built < 1 ? s.cost : Math.floor(s.cost * 0.4 * (s.hp / STRUCTS[s.kind].hp));
+  st.res.mat += refund;
+  removeStructure(st, rt, id);
+  toast(rt, `${STRUCTS[s.kind].name} ${s.built < 1 ? 'cancelled' : 'taken down'}${refund ? ` (+${refund} materials)` : ''}.`, 'info');
+  sfx(rt, 'build', s.x, s.y);
+}
+
+export function refundOf(s: Structure): number {
+  return s.built < 1 ? s.cost : Math.floor(s.cost * 0.4 * (s.hp / STRUCTS[s.kind].hp));
+}
+
+// ---- demolition ------------------------------------------------------------------
+
+/** Spots around a building's walls where the crew works. */
+function perimeterSpots(rt: Runtime, r: { x: number; y: number; w: number; h: number }, n: number, seed: number): Vec[] {
+  const per = 2 * (r.w + r.h);
+  const out: Vec[] = [];
+  for (let i = 0; i < n; i++) {
+    let t = ((i + 0.5) / n + (seed % 7) * 0.031) * per;
+    t %= per;
+    let x: number;
+    let y: number;
+    const o = 7;
+    if (t < r.w) {
+      x = r.x + t;
+      y = r.y + r.h + o;
+    } else if (t < r.w + r.h) {
+      x = r.x + r.w + o;
+      y = r.y + r.h - (t - r.w);
+    } else if (t < 2 * r.w + r.h) {
+      x = r.x + r.w - (t - r.w - r.h);
+      y = r.y - o;
+    } else {
+      x = r.x - o;
+      y = r.y + (t - 2 * r.w - r.h);
+    }
+    out.push(rt.nav.nearestFree(x, y, 4));
+  }
+  return out;
+}
+
+function startDemolition(st: GameState, rt: Runtime, squad: number, members: Survivor[]): void {
+  const o = st.squads[squad].order;
+  const id = o.b!;
+  const bs = st.b[id];
+  const d = rt.map.buildings[id];
+  if (canDemolish(st, rt, id)) {
+    st.squads[squad].order = { t: 'idle' };
+    return;
+  }
+  if (!bs.explored) {
+    bs.explored = true;
+    toast(rt, `${d.name} checked. The crew starts tearing it down.`, 'info');
+  }
+  rescue(st, rt, id);
+  o.phase = 'work';
+  o.timer = 0;
+  bs.demo ??= 0;
+  const spots = perimeterSpots(rt, d, members.length, squad * 3 + id);
+  members.forEach((m, i) => {
+    m.goal = spots[i];
+    m.path = rt.nav.findPath(m.x, m.y, spots[i].x, spots[i].y);
+  });
+  sfx(rt, 'build', d.door.x, d.door.y);
+}
+
+function workDemolition(st: GameState, rt: Runtime, squad: number, members: Survivor[], dt: number): void {
+  const o = st.squads[squad].order;
+  const id = o.b!;
+  const bs = st.b[id];
+  const d = rt.map.buildings[id];
+  if (bs.demolished) {
+    st.squads[squad].order = { t: 'idle' };
+    return;
+  }
+  const info = demolishInfo(rt, id);
+  let crew = 0;
+  for (const m of members) {
+    if (m.eng || m.inside >= 0) continue;
+    if (m.goal && dist(m.x, m.y, m.goal.x, m.goal.y) < 8 && !m.path) {
+      crew += m.role === 'engineer' ? 1.6 : 1;
+      m.working = true;
+      m.facing = Math.atan2(d.y + d.h / 2 - m.y, d.x + d.w / 2 - m.x);
+    }
+  }
+  if (crew <= 0) return;
+  bs.demo = Math.min(1, (bs.demo ?? 0) + (crew * dt) / info.work);
+  o.timer = (o.timer ?? 0) + dt;
+  if (o.timer > 2.4) {
+    o.timer = 0;
+    noise(rt, d.x + d.w / 2, d.y + d.h / 2, 210 * weatherOf(st).noise);
+    sfx(rt, 'build', d.x + d.w / 2, d.y + d.h / 2);
+  }
+  if (rt.rng.chance(dt * 6)) {
+    rt.particles.push({ x: d.x + rt.rng.next() * d.w, y: d.y + rt.rng.next() * d.h, vx: rt.rng.range(-8, 8), vy: rt.rng.range(-12, -2), t: 0, life: rt.rng.range(0.8, 1.6), c: '#8f877a', s: rt.rng.range(1.5, 3.5) });
+  }
+  if (bs.demo >= 1) finishDemolition(st, rt, id);
+}
+
+function finishDemolition(st: GameState, rt: Runtime, id: number): void {
+  const bs = st.b[id];
+  const d = rt.map.buildings[id];
+  const info = demolishInfo(rt, id);
+  const crew = st.squads.filter((q) => q.order.b === id).flatMap((q) => squadMembers(st, q.id));
+  // anyone still inside comes out first
+  for (const q of st.squads) if (q.order.b === id && q.order.phase === 'inside') exitBuilding(st, rt, q.id, true);
+  if ((bs.loot.food || 0) + bs.loot.mat + bs.loot.ammo + bs.loot.med + bs.loot.guns + (bs.loot.fuel || 0) > 0) collectLoot(st, rt, id, 1, crew);
+  const bonus = crew.some((m) => m.role === 'engineer') ? Math.round(info.mat * 0.15) : 0;
+  st.res.mat += info.mat + bonus;
+  const wasOwned = bs.owned;
+  bs.demolished = true;
+  bs.owned = false;
+  bs.fort = 0;
+  bs.demo = 1;
+  bs.survivors = 0;
+  bs.infected = 0;
+  rt.nav.clearRect(d);
+  rt.flowDirty = true;
+  if (wasOwned) rt.postsDirty = true;
+  for (const q of st.squads) if (q.order.b === id) q.order = { t: 'idle' };
+  for (const m of crew) m.path = null;
+  rt.events.push({ k: 'world', building: id });
+  toast(rt, `${d.name} torn down: +${info.mat + bonus} materials${wasOwned ? ` (-${d.capacity} beds)` : ''}.`, 'good');
+  sfx(rt, 'crash', d.x + d.w / 2, d.y + d.h / 2);
+  for (let i = 0; i < 40; i++)
+    rt.particles.push({ x: d.x + rt.rng.next() * d.w, y: d.y + rt.rng.next() * d.h, vx: rt.rng.range(-25, 25), vy: rt.rng.range(-25, 10), t: 0, life: rt.rng.range(1, 2.4), c: rt.rng.chance(0.5) ? '#9a9286' : '#6d665c', s: rt.rng.range(2, 5) });
+  noise(rt, d.x + d.w / 2, d.y + d.h / 2, 320);
+}
+
+// ---- salvage -----------------------------------------------------------------------
+
+function updateSalvage(st: GameState, rt: Runtime, squad: number, members: Survivor[], dt: number): void {
+  const o = st.squads[squad].order;
+  _st = st;
+  const v = o.v !== undefined ? st.vehicles.find((q) => q.id === o.v) : undefined;
+  const p = o.p !== undefined ? rt.map.props[o.p] : undefined;
+  const gone = (o.p !== undefined && st.salvaged.includes(o.p)) || (o.v !== undefined && (!v || v.squad >= 0));
+  if ((!v && !p) || gone) {
+    st.squads[squad].order = { t: 'idle' };
+    return;
+  }
+  const tx = v ? v.x : p!.x;
+  const ty = v ? v.y : p!.y;
+  const info = v ? vehicleSalvageInfo(v) : salvageInfo(rt, o.p!)!;
+  if (o.phase === 'go') {
+    const near = members.some((m) => dist(m.x, m.y, tx, ty) < 24);
+    if (!near) {
+      if (members.every((m) => !m.path)) {
+        toast(rt, "Squad can't reach it.", 'warn');
+        st.squads[squad].order = { t: 'idle' };
+      }
+      return;
+    }
+    o.phase = 'work';
+    o.timer = 0;
+    o.total = info.work;
+    members.forEach((m, i) => {
+      const a = (i / Math.max(1, members.length)) * Math.PI * 2 + 0.6;
+      const g = rt.nav.nearestFree(tx + Math.cos(a) * 13, ty + Math.sin(a) * 10, 3);
+      m.goal = g;
+      m.path = rt.nav.findPath(m.x, m.y, g.x, g.y);
+    });
+    return;
+  }
+  let crew = 0;
+  for (const m of members) {
+    if (m.eng || m.inside >= 0) continue;
+    if (dist(m.x, m.y, tx, ty) < 22 && !m.path) {
+      crew += m.role === 'engineer' ? 1.6 : 1;
+      m.working = true;
+      m.facing = Math.atan2(ty - m.y, tx - m.x);
+    }
+  }
+  o.timer = (o.timer ?? 0) + crew * dt;
+  if (crew > 0 && rt.rng.chance(dt * 3)) spark(rt, tx + rt.rng.range(-6, 6), ty + rt.rng.range(-4, 4), '#ffd28a');
+  if (crew > 0 && rt.rng.chance(dt * 0.6)) sfx(rt, 'melee', tx, ty);
+  if ((o.timer ?? 0) < (o.total ?? 1)) return;
+  st.res.mat += info.mat;
+  st.res.fuel += info.fuel;
+  if (v) {
+    st.vehicles = st.vehicles.filter((q) => q.id !== v.id);
+    for (const q of st.squads) if (q.vehicle === v.id) q.vehicle = -1;
+  } else {
+    st.salvaged.push(o.p!);
+    rt.nav.clearProp(p!);
+    rt.events.push({ k: 'world', prop: o.p });
+  }
+  toast(rt, `Scrapped for parts: +${info.mat} materials${info.fuel ? `, +${info.fuel} fuel` : ''}.`, 'good');
+  sfx(rt, 'loot', tx, ty);
+  for (const m of members) m.path = null;
+  st.squads[squad].order = { t: 'idle' };
+}
+
+// ---- walls & construction crews ----------------------------------------------------
+
+function rebuildWalls(st: GameState, rt: Runtime): void {
+  rt.wallAt.fill(-1);
+  for (const s of st.structures) {
+    if (s.kind !== 'wall' || s.built < 1) continue;
+    const len = Math.hypot(s.x2! - s.x, s.y2! - s.y) || 1;
+    const nx = -(s.y2! - s.y) / len;
+    const ny = (s.x2! - s.x) / len;
+    for (let t = 0; t <= len; t += 3)
+      for (const o of [-3, 0, 3]) {
+        const x = s.x + ((s.x2! - s.x) * t) / len + nx * o;
+        const y = s.y + ((s.y2! - s.y) * t) / len + ny * o;
+        const cx = Math.floor(x / CELL);
+        const cy = Math.floor(y / CELL);
+        if (rt.nav.inBounds(cx, cy)) rt.wallAt[cy * rt.nav.w + cx] = s.id;
+      }
+  }
+  rt.wallsDirty = false;
+  rt.flowDirty = true;
+}
+
+/** Where a builder stands for a given site. */
+function siteSpot(rt: Runtime, s: Structure, k: number): Vec {
+  if (s.kind === 'wall') {
+    const t = (k % 4 + 0.5) / 4;
+    const len = Math.hypot(s.x2! - s.x, s.y2! - s.y) || 1;
+    const side = k % 2 ? 1 : -1;
+    return rt.nav.nearestFree(s.x + (s.x2! - s.x) * t + (-(s.y2! - s.y) / len) * 8 * side, s.y + (s.y2! - s.y) * t + ((s.x2! - s.x) / len) * 8 * side, 3);
+  }
+  const a = (k / 4) * Math.PI * 2 + 0.4;
+  const r = STRUCTS[s.kind].r + 7;
+  return rt.nav.nearestFree(s.x + Math.cos(a) * r, s.y + Math.sin(a) * r, 3);
+}
+
+function pickSite(st: GameState, rt: Runtime, g: Survivor): Structure | null {
+  let best: Structure | null = null;
+  let bd = Infinity;
+  for (const s of st.structures) {
+    if (s.built >= 1) continue;
+    const crew = st.survivors.filter((q) => q.job === s.id && q !== g).length;
+    if (crew >= 4) continue;
+    if (nearestZombie(rt, s.x, s.y, 90, false)) continue;
+    const d = dist(g.x, g.y, s.x, s.y);
+    if (d < bd) {
+      bd = d;
+      best = s;
+    }
+  }
+  return best;
+}
+
+/** Haven guards build construction sites when it's safe. Returns true if busy building. */
+function guardBuild(st: GameState, rt: Runtime, g: Survivor, dt: number): boolean {
+  const site = pickSite(st, rt, g);
+  if (!site) {
+    g.job = -1;
+    return false;
+  }
+  const k = st.survivors.filter((q) => q.job === site.id && q.id < g.id).length;
+  const spot = siteSpot(rt, site, k);
+  if (g.job !== site.id || !g.goal || dist(g.goal.x, g.goal.y, spot.x, spot.y) > 2) {
+    g.job = site.id;
+    g.goal = spot;
+    g.path = rt.nav.findPath(g.x, g.y, spot.x, spot.y);
+  }
+  if (g.path) {
+    moveAlong(rt, g, 38 * (g.role === 'scout' ? 1.3 : 1), dt);
+    return true;
+  }
+  if (dist(g.x, g.y, spot.x, spot.y) > 10) {
+    g.job = -1;
+    return false;
+  }
+  g.working = true;
+  const cx = site.kind === 'wall' ? (site.x + site.x2!) / 2 : site.x;
+  const cy = site.kind === 'wall' ? (site.y + site.y2!) / 2 : site.y;
+  g.facing = Math.atan2(cy - g.y, cx - g.x);
+  site.built = Math.min(1, site.built + (dt * (g.role === 'engineer' ? 1.6 : 1)) / workFor(site));
+  site.hp = Math.max(site.hp, STRUCTS[site.kind].hp * (0.25 + 0.75 * site.built));
+  if (rt.rng.chance(dt * 0.7)) sfx(rt, 'melee', cx, cy);
+  if (site.built >= 1) completeStructure(st, rt, site);
+  return true;
+}
+
+function attackWall(st: GameState, rt: Runtime, z: Zombie, wallId: number): void {
+  if (z.cd > 0) return;
+  const s = st.structures.find((q) => q.id === wallId);
+  if (!s) {
+    rt.wallsDirty = true;
+    return;
+  }
+  const K = ZKINDS[z.kind];
+  s.hp -= K.dmg * 0.6;
+  z.cd = K.cd;
+  spark(rt, z.x, z.y, '#a07a50');
+  if (s.hp <= 0) {
+    toast(rt, 'A palisade wall was torn down!', 'bad');
+    removeStructure(st, rt, s.id);
+  }
 }
 
 /** Moves one survivor between the haven guard pool and a squad. */
@@ -889,9 +1304,10 @@ function noise(rt: Runtime, x: number, y: number, r: number): void {
   });
 }
 
-function damageZombie(st: GameState, rt: Runtime, z: Zombie, dmg: number, killer: Survivor | null): void {
+function damageZombie(st: GameState, rt: Runtime, z: Zombie, dmg: number, killer: Survivor | null, bloodN = 3): void {
+  if (z.hp <= 0) return;
   z.hp -= dmg;
-  blood(rt, z.x, z.y, 3);
+  if (bloodN) blood(rt, z.x, z.y, bloodN);
   if (z.hp <= 0) {
     st.stats.kills++;
     if (killer) killer.kills++;
@@ -980,6 +1396,7 @@ function moveAlong(rt: Runtime, s: Survivor, speed: number, dt: number): void {
 }
 
 function updateSurvivors(st: GameState, rt: Runtime, dt: number): void {
+  for (const s of st.survivors) s.eng = false;
   if (rt.postsDirty) computePosts(st, rt);
   const h = hq(rt);
   for (const s of st.survivors) {
@@ -1020,9 +1437,11 @@ function updateSurvivors(st: GameState, rt: Runtime, dt: number): void {
       }
       continue;
     }
+    s.eng = engaged;
     if (engaged && s.squad >= 0) continue; // squads stop to shoot
     if (s.squad === -1) {
       if (engaged) continue;
+      if (guardBuild(st, rt, s, dt)) continue;
       if (s.post && !s.path && dist(s.x, s.y, s.post.x, s.post.y) > 5) {
         s.goal = s.post;
         s.path = rt.nav.findPath(s.x, s.y, s.post.x, s.post.y);
@@ -1092,25 +1511,33 @@ function rebuildFlow(st: GameState, rt: Runtime): void {
     if (b.owned) targets.push(...rt.nav.ringCells(rt.map.buildings[i], 8));
   });
   for (const s of st.structures) {
-    if (s.kind === 'barrel' || s.kind === 'garden') continue;
+    if (s.kind === 'barrel' || s.kind === 'garden' || s.kind === 'wall' || s.kind === 'trap' || s.built < 1) continue;
     const r = STRUCTS[s.kind].r + 6;
     targets.push(...rt.nav.ringCells({ x: s.x - r, y: s.y - r, w: r * 2, h: r * 2 }, 0));
   }
-  rt.flow = rt.nav.flowField(targets);
+  rt.flow = rt.nav.flowField(targets, rt.wallAt);
   rt.flowDirty = false;
 }
 
-function zMove(rt: Runtime, z: Zombie, tx: number, ty: number, speed: number, dt: number): void {
+/** Moves an infected toward a point. Returns the id of a wall blocking the way, or -1. */
+function zMove(rt: Runtime, z: Zombie, tx: number, ty: number, speed: number, dt: number): number {
   const dx = tx - z.x;
   const dy = ty - z.y;
   const d = Math.hypot(dx, dy);
-  if (d < 0.5) return;
+  if (d < 0.5) return -1;
   const vx = (dx / d) * speed;
   const vy = (dy / d) * speed;
   z.vx += (vx - z.vx) * Math.min(1, dt * 6);
   z.vy += (vy - z.vy) * Math.min(1, dt * 6);
   const nx = z.x + z.vx * dt;
   const ny = z.y + z.vy * dt;
+  const wi = rt.wallAt[rt.nav.idx(nx, ny)] ?? -1;
+  if (wi >= 0 && rt.wallAt[rt.nav.idx(z.x, z.y)] !== wi) {
+    z.vx *= 0.2;
+    z.vy *= 0.2;
+    z.facing = Math.atan2(dy, dx);
+    return wi;
+  }
   if (!rt.nav.isBlocked(nx, ny)) {
     z.x = nx;
     z.y = ny;
@@ -1122,6 +1549,7 @@ function zMove(rt: Runtime, z: Zombie, tx: number, ty: number, speed: number, dt
   }
   z.facing = Math.atan2(z.vy, z.vx);
   z.anim += dt * speed * 0.22;
+  return -1;
 }
 
 function flowStep(rt: Runtime, z: Zombie): Vec | null {
@@ -1212,17 +1640,23 @@ function updateZombies(st: GameState, rt: Runtime, dt: number): void {
       } else {
         // Direct chase when there's a clear line, otherwise follow the flow toward the haven
         // as a fallback, or slide along walls.
-        zMove(rt, z, t.x, t.y, speed, dt);
+        const w = zMove(rt, z, t.x, t.y, speed, dt);
+        if (w >= 0) attackWall(st, rt, z, w);
       }
     } else if (z.mode === 2) {
       const step = flowStep(rt, z);
-      if (step) zMove(rt, z, step.x, step.y, speed * 0.9, dt);
-      else if (think) attackBase(st, rt, z);
+      if (step) {
+        const w = zMove(rt, z, step.x, step.y, speed * 0.9, dt);
+        if (w >= 0) attackWall(st, rt, z, w);
+      } else if (think) attackBase(st, rt, z);
       if (rt.flow && rt.flow[rt.nav.idx(z.x, z.y)] <= 1.5) attackBase(st, rt, z);
     } else if (z.mode === 3) {
-      zMove(rt, z, z.tx, z.ty, speed * 0.85, dt);
-    } else {
-      zMove(rt, z, z.tx, z.ty, K.wander, dt);
+      const w = zMove(rt, z, z.tx, z.ty, speed * 0.85, dt);
+      if (w >= 0) attackWall(st, rt, z, w);
+    } else if (zMove(rt, z, z.tx, z.ty, K.wander, dt) >= 0) {
+      // wanderers just turn away from walls
+      z.tx = z.x - (z.tx - z.x);
+      z.ty = z.y - (z.ty - z.y);
     }
   }
   // separation
@@ -1239,7 +1673,8 @@ function updateZombies(st: GameState, rt: Runtime, dt: number): void {
         const push = (min - d) * 0.3;
         const nx = z.x - (dx / d) * push;
         const ny = z.y - (dy / d) * push;
-        if (!rt.nav.isBlocked(nx, ny)) {
+        const wNew = rt.wallAt[rt.nav.idx(nx, ny)] ?? -1;
+        if (!rt.nav.isBlocked(nx, ny) && (wNew < 0 || wNew === rt.wallAt[rt.nav.idx(z.x, z.y)])) {
           z.x = nx;
           z.y = ny;
         }
@@ -1254,7 +1689,7 @@ function attackBase(st: GameState, rt: Runtime, z: Zombie): void {
   const K = ZKINDS[z.kind];
   // structures first
   for (const s of st.structures) {
-    if (s.kind === 'barrel' || s.kind === 'garden') continue;
+    if (s.kind === 'barrel' || s.kind === 'garden' || s.kind === 'wall' || s.kind === 'trap') continue;
     if (dist(s.x, s.y, z.x, z.y) < STRUCTS[s.kind].r + 9) {
       s.hp -= K.dmg * 0.5;
       z.cd = K.cd;
@@ -1289,7 +1724,9 @@ function removeStructure(st: GameState, rt: Runtime, id: number): void {
   const s = st.structures.find((q) => q.id === id);
   if (!s) return;
   st.structures = st.structures.filter((q) => q.id !== id);
-  if (s.kind === 'tower' || s.kind === 'workshop' || s.kind === 'infirmary') {
+  for (const g of st.survivors) if (g.job === id) g.job = -1;
+  if (s.kind === 'wall') rt.wallsDirty = true;
+  if (SOLID.has(s.kind) && s.built >= 1) {
     // restore walkability (rebuild from scratch is simpler than tracking)
     const r = STRUCTS[s.kind].r - 2;
     for (let dx = -r; dx <= r; dx += CELL / 2) for (let dy = -r; dy <= r; dy += CELL / 2) rt.nav.blocked[rt.nav.idx(s.x + dx, s.y + dy)] = 0;
@@ -1321,6 +1758,22 @@ function updateStructures(st: GameState, rt: Runtime, dt: number): void {
   const night = isNight(st.time);
   for (const s of st.structures) {
     s.t += dt;
+    if (s.built < 1) continue;
+    if (s.kind === 'trap') {
+      let hits = 0;
+      forZombiesNear(rt, s.x, s.y, STRUCTS.trap.r + 3, (z) => {
+        hits++;
+        damageZombie(st, rt, z, 30 * dt, null, rt.rng.chance(dt * 4) ? 2 : 0);
+      });
+      if (hits) {
+        s.hp -= 5 * hits * dt;
+        if (s.hp <= 0) {
+          toast(rt, 'A spike trap wore out.', 'warn');
+          removeStructure(st, rt, s.id);
+          break;
+        }
+      }
+    }
     if (s.kind === 'tower') {
       s.cd -= dt;
       if (s.cd <= 0 && st.res.ammo > 0) {
@@ -1336,7 +1789,7 @@ function updateStructures(st: GameState, rt: Runtime, dt: number): void {
     rt.workshopTimer += dt;
     if (rt.workshopTimer > 18) {
       rt.workshopTimer = 0;
-      const n = st.structures.filter((s) => s.kind === 'workshop').length;
+      const n = st.structures.filter((s) => s.kind === 'workshop' && s.built >= 1).length;
       const eng = Math.min(2, st.survivors.filter((s) => s.squad === -1 && !s.joining && s.role === 'engineer').length);
       for (let i = 0; i < n; i++) {
         if (st.res.mat >= 2) {
@@ -1503,7 +1956,7 @@ function newDay(st: GameState, rt: Runtime): void {
     st.survivors.slice(0, hungry).forEach((s) => (s.hp = Math.max(1, s.hp - 30)));
     notes.push(`${hungry} went hungry`);
   } else notes.push(`ate ${eaten} food`);
-  const gardens = st.structures.filter((s) => s.kind === 'garden').length;
+  const gardens = st.structures.filter((s) => s.kind === 'garden' && s.built >= 1).length;
   if (gardens) {
     st.res.food += gardens * 4;
     notes.push(`gardens +${gardens * 4} food`);
@@ -1531,6 +1984,15 @@ function newDay(st: GameState, rt: Runtime): void {
     b.hp = Math.min(max, b.hp + pay * per);
     repaired += pay;
   });
+  for (const s of st.structures) {
+    if (s.built < 1) continue;
+    const missing = STRUCTS[s.kind].hp - s.hp;
+    if (missing <= 0) continue;
+    const pay = Math.min(Math.ceil(missing / per), st.res.mat);
+    st.res.mat -= pay;
+    s.hp = Math.min(STRUCTS[s.kind].hp, s.hp + pay * per);
+    repaired += pay;
+  }
   if (repaired) notes.push(`repairs used ${repaired} materials`);
   // more infected drift into town
   populate(st, rt, 10 + st.day * 2, 520);
@@ -1593,6 +2055,7 @@ export function viewers(st: GameState, rt: Runtime): Viewer[] {
     out.push({ x: d.x + d.w / 2, y: d.y + d.h / 2, r: Math.max(d.w, d.h) / 2 + (night ? 70 : 110) });
   });
   for (const s of st.structures) {
+    if (s.built < 1) continue;
     if (s.kind === 'tower') out.push({ x: s.x, y: s.y, r: 210 });
     else if (s.kind === 'barrel') out.push({ x: s.x, y: s.y, r: 140 });
   }
@@ -1662,6 +2125,8 @@ export function step(st: GameState, rt: Runtime, dt: number): void {
   if (st.over) return;
   updateTime(st, rt, dt);
   if (st.over) return;
+  _st = st;
+  if (rt.wallsDirty) rebuildWalls(st, rt);
   if (rt.flowDirty) rebuildFlow(st, rt);
   rebuildZGrid(st, rt);
   rt.thinkTimer -= dt;
@@ -1674,7 +2139,7 @@ export function step(st: GameState, rt: Runtime, dt: number): void {
   rt.attackAlert -= dt;
 
   // healing near the haven
-  const infirm = st.structures.some((s) => s.kind === 'infirmary');
+  const infirm = st.structures.some((s) => s.kind === 'infirmary' && s.built >= 1);
   for (const s of st.survivors) {
     if (s.hp >= s.maxHp) continue;
     if ((s.inside >= 0 && !aboard(s)) || distToBase(st, rt, s.x, s.y) < 60) s.hp = Math.min(s.maxHp, s.hp + dt * (infirm ? 2.5 : 0.5));
