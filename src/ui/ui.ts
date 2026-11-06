@@ -26,6 +26,7 @@ import { TUTORIAL, canClaim, canDemolish, demolishInfo, engineerAtHaven, fortCos
 import type { MapData } from '../world/types';
 import type { ViewState } from '../render/worldRenderer';
 import type { Prefs } from '../save';
+import { OSM_ATTRIBUTION, SUGGESTED, type Place } from '../world/osm';
 
 export interface App {
   st: GameState | null;
@@ -53,6 +54,10 @@ export interface App {
   focusHaven(): void;
   newGame(): void;
   continueGame(): void;
+  search(q: string): Promise<Place[]>;
+  pickPlace(p: Place): void;
+  useMyLocation(): void;
+  cancelLoad(): void;
   hasSave(): boolean;
   quitToTitle(): void;
   click(): void;
@@ -82,7 +87,10 @@ export class Ui {
   private squadKeys: string[] = [];
   private placeKey = '';
   private pressing = false;
-  private screen: '' | 'title' | 'howto' | 'pause' | 'end' | 'settings' = '';
+  private screen: '' | 'title' | 'howto' | 'pause' | 'end' | 'settings' | 'mappick' | 'loading' = '';
+  private places: Place[] = SUGGESTED;
+  private placesAreResults = false;
+  private lastQuery = '';
   private settingsBack: 'title' | 'pause' = 'title';
 
   constructor(
@@ -96,6 +104,7 @@ export class Ui {
           <div class="phase" data-r="phase"><i></i></div>
           <div class="phase-label" data-r="phaseLabel"></div>
           <div class="objective" data-r="objWrap">${I.target}<span data-r="obj"></span></div>
+          <div class="attrib hidden" data-r="attrib"></div>
         </div>
         <div class="res panel" data-r="res"></div>
         <div class="controls">
@@ -133,6 +142,12 @@ export class Ui {
 
     this.hud.addEventListener('click', (e) => this.onClick(e));
     this.screens.addEventListener('click', (e) => this.onScreenClick(e));
+    this.screens.addEventListener('keydown', (e) => {
+      if ((e.target as HTMLElement).id === 'place-q' && e.key === 'Enter') {
+        e.preventDefault();
+        void this.doSearch();
+      }
+    });
     this.el.card.addEventListener('pointerdown', () => (this.pressing = true));
     const release = () => setTimeout(() => (this.pressing = false), 0);
     addEventListener('pointerup', release);
@@ -261,7 +276,24 @@ export class Ui {
     const p = this.app.prefs;
     switch (a.dataset.act) {
       case 'new':
+        this.showMapPicker();
+        break;
+      case 'play-proc':
         this.app.newGame();
+        break;
+      case 'search':
+        void this.doSearch();
+        break;
+      case 'place': {
+        const pl = this.places[Number(a.dataset.i)];
+        if (pl) this.app.pickPlace(pl);
+        break;
+      }
+      case 'locate':
+        this.app.useMyLocation();
+        break;
+      case 'cancel-load':
+        this.app.cancelLoad();
         break;
       case 'continue':
         this.app.continueGame();
@@ -274,7 +306,8 @@ export class Ui {
         this.showSettings();
         break;
       case 'back':
-        if (this.screen === 'settings' && this.settingsBack === 'title') this.showTitle();
+        if (this.screen === 'mappick') this.showTitle();
+        else if (this.screen === 'settings' && this.settingsBack === 'title') this.showTitle();
         else if (this.app.st && !this.app.st.over && (this.screen !== 'howto' || this.settingsBack === 'pause' || this.app.paused)) this.showPause();
         else this.showTitle();
         break;
@@ -631,6 +664,9 @@ export class Ui {
     (this.el.phase.firstElementChild as HTMLElement).style.width = `${Math.min(100, frac * 100)}%`;
     this.el.phaseLabel.textContent = label;
     const tut = TUTORIAL[Math.min(st.tutorial, TUTORIAL.length - 1)];
+    const real = this.app.map.real;
+    this.el.attrib.classList.toggle('hidden', !real);
+    if (real && this.el.attrib.textContent !== `Map ${OSM_ATTRIBUTION}`) this.el.attrib.textContent = `Map ${OSM_ATTRIBUTION}`;
     this.el.obj.textContent = st.tutorial >= TUTORIAL.length - 1 ? `Survive until Day ${GOAL_DAY}. ${Math.max(0, GOAL_DAY - st.day)} days to go.` : tut;
 
     // resources
@@ -775,7 +811,7 @@ export class Ui {
     this.screen = '';
   }
 
-  showTitle(): void {
+  showTitle(message = ''): void {
     this.screen = 'title';
     const save = this.app.hasSave();
     this.screens.innerHTML = `<div class="screen title"><div class="title-inner">
@@ -787,7 +823,8 @@ export class Ui {
         <button class="btn" data-act="howto">${I.info}How to play</button>
         <button class="btn" data-act="settings">${I.gear}Settings</button>
       </div>
-      <div class="foot">v0.4 prototype · pre-generated town map</div>
+      ${message ? `<div class="note warn-note">${esc(message)}</div>` : ''}
+      <div class="foot">v0.5 prototype</div>
     </div></div>`;
   }
 
@@ -808,6 +845,7 @@ export class Ui {
         ${tip(I.claim, 'Grow the haven', 'Claim cleared buildings next to your haven for more beds. Rescued survivors move in and stand guard.')}
         ${tip(I.fortify, 'Fortify & build', 'Barricade haven buildings and build watchtowers, fire barrels, gardens, workshops and infirmaries.')}
         ${tip(I.moon, 'Nights are deadly', 'At 20:00 a horde marches on the haven. Light the dark so guards can see, and bring squads home.')}
+        ${tip(I.haven, 'Real-world towns', 'Start a new game on a real place: search for it or use your location. Its streets, buildings and parks come from OpenStreetMap.')}
         ${tip(I.rain, 'Weather', 'Rain muffles gunfire but cuts visibility. Fog hides the infected until they are close.')}
       </div>
       <div class="row"><button class="btn primary" data-act="back">${I.ret}Back</button></div>
@@ -860,6 +898,66 @@ export class Ui {
       </div>
       <div class="row"><button class="btn primary" data-act="new">${I.flame}New game</button><button class="btn" data-act="quit">${I.ret}Title</button></div>
     </div></div>`;
+  }
+
+  // ------------------------------------------------------------------ map picker
+
+  showMapPicker(opts: { error?: string; busy?: boolean } = {}): void {
+    this.screen = 'mappick';
+    const list = this.places
+      .map((p, i) => `<button class="place" data-act="place" data-i="${i}"><b>${esc(p.name)}</b><span>${esc(p.detail ?? '')}</span></button>`)
+      .join('');
+    this.screens.innerHTML = `<div class="screen dim"><div class="modal panel picker">
+      <h2>Choose your town</h2>
+      <div class="pick-grid">
+        <button class="pick-card" data-act="play-proc"><b>${I.flame}Millbrook</b><span>A pre-generated river town with a downtown, suburbs and an industrial park. Plays offline, no download.</span><em class="pick-go">Play Millbrook ${I.play}</em></button>
+        <div class="pick-card real">
+          <b>${I.haven}A real place</b><span>Real streets, buildings, parks and rivers from OpenStreetMap. Needs the internet once.</span>
+          <div class="search-row"><input id="place-q" type="search" placeholder="Town, district or address" enterkeyhint="search" autocomplete="off" value="${esc(this.lastQuery)}"/><button class="btn primary" data-act="search">${I.scout}</button></div>
+          <button class="btn" data-act="locate">${I.target}Use my location</button>
+        </div>
+      </div>
+      <div class="sub-title">${opts.busy ? 'Searching…' : this.placesAreResults ? 'Results' : 'Suggestions'}</div>
+      <div class="place-list">${opts.busy ? '' : list || '<div class="note">Nothing found. Try a town or city name.</div>'}</div>
+      ${opts.error ? `<div class="note warn-note">${esc(opts.error)}</div>` : ''}
+      <div class="note">The area around the place you pick (about 1.2 × 1.2 km) becomes your town. Map data ${OSM_ATTRIBUTION}, available under the Open Database Licence.</div>
+      <div class="row"><button class="btn" data-act="back">${I.ret}Back</button></div>
+    </div></div>`;
+  }
+
+  private async doSearch(): Promise<void> {
+    const input = this.screens.querySelector<HTMLInputElement>('#place-q');
+    const q = (input?.value ?? '').trim();
+    this.lastQuery = q;
+    if (!q) return;
+    this.showMapPicker({ busy: true });
+    try {
+      this.places = await this.app.search(q);
+      this.placesAreResults = true;
+      if (this.screen === 'mappick') this.showMapPicker();
+    } catch (e) {
+      if (this.screen === 'mappick') this.showMapPicker({ error: e instanceof Error ? e.message : 'Search failed. Check your connection.' });
+    }
+  }
+
+  showLoading(name: string, status: string): void {
+    this.screen = 'loading';
+    this.screens.innerHTML = `<div class="screen dim"><div class="modal panel loading-card">
+      <div class="spinner"></div>
+      <h2>${esc(name)}</h2>
+      <div class="note" data-r="load-status">${esc(status)}</div>
+      <div class="note small">Map data ${OSM_ATTRIBUTION}</div>
+      <div class="row"><button class="btn" data-act="cancel-load">${I.close}Cancel</button></div>
+    </div></div>`;
+  }
+
+  setLoadingStatus(status: string): void {
+    const el = this.screens.querySelector<HTMLElement>('[data-r="load-status"]');
+    if (el) el.textContent = status;
+  }
+
+  get currentScreen(): string {
+    return this.screen;
   }
 
   get screenOpen(): boolean {

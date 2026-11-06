@@ -1,6 +1,7 @@
 import type { MapData, Prop } from './types';
 import type { Rect, Vec } from '../core/math';
 import { inRiver, vehicleSpots } from './mapgen';
+import { pointInPoly, polyBounds } from './geo';
 
 export const CELL = 10;
 
@@ -93,7 +94,16 @@ export class NavGrid {
           if (opaque) this.opaque[y * this.w + x] = 1;
         }
     };
-    for (const b of map.buildings) markRect(b, 1, true);
+    for (const b of map.buildings) {
+      if (b.poly) this.markPoly(b.poly, 1, 1);
+      else markRect(b, 1, true);
+    }
+    // real-world water (lakes, river areas, streams); bridges are opened again below
+    for (const wb of map.water ?? []) {
+      if (wb.poly) this.markPoly(wb.poly, 1, 0);
+      if (wb.line && (wb.w ?? 0) >= 6) this.markLine(wb.line, (wb.w ?? 4) / 2 - 1, 1);
+    }
+    for (const wy of map.ways ?? []) if (wy.bridge) this.markLine(wy.pts, wy.w / 2 + 1, 0);
     // river (bridges stay open)
     for (let y = 0; y < this.h; y++)
       for (let x = 0; x < this.w; x++) {
@@ -134,6 +144,45 @@ export class NavGrid {
   /** Makes a scrapped prop walkable again. */
   clearProp(p: Prop): void {
     for (const i of this.propCells(p)) this.blocked[i] = 0;
+  }
+
+  /** Sets blocked (and opaque, for buildings) on cells whose centres lie inside a polygon. */
+  markPoly(p: Vec[], blocked: 0 | 1, opaque: 0 | 1): void {
+    const b = polyBounds(p);
+    const x0 = Math.max(0, Math.floor(b.x / CELL));
+    const y0 = Math.max(0, Math.floor(b.y / CELL));
+    const x1 = Math.min(this.w - 1, Math.floor((b.x + b.w) / CELL));
+    const y1 = Math.min(this.h - 1, Math.floor((b.y + b.h) / CELL));
+    for (let y = y0; y <= y1; y++)
+      for (let x = x0; x <= x1; x++) {
+        if (!pointInPoly(p, x * CELL + CELL / 2, y * CELL + CELL / 2)) continue;
+        const i = y * this.w + x;
+        this.blocked[i] = blocked;
+        if (opaque || !blocked) this.opaque[i] = opaque;
+      }
+  }
+
+  /** Sets blocked on cells within `r` of a polyline. */
+  markLine(pts: Vec[], r: number, blocked: 0 | 1): void {
+    for (let k = 1; k < pts.length; k++) {
+      const a = pts[k - 1];
+      const b = pts[k];
+      const len = Math.hypot(b.x - a.x, b.y - a.y) || 1;
+      for (let s = 0; s <= len; s += CELL / 2) {
+        const px = a.x + ((b.x - a.x) * s) / len;
+        const py = a.y + ((b.y - a.y) * s) / len;
+        const x0 = Math.max(0, Math.floor((px - r) / CELL));
+        const y0 = Math.max(0, Math.floor((py - r) / CELL));
+        const x1 = Math.min(this.w - 1, Math.floor((px + r) / CELL));
+        const y1 = Math.min(this.h - 1, Math.floor((py + r) / CELL));
+        for (let y = y0; y <= y1; y++)
+          for (let x = x0; x <= x1; x++) {
+            const cx = x * CELL + CELL / 2;
+            const cy = y * CELL + CELL / 2;
+            if ((cx - px) ** 2 + (cy - py) ** 2 <= r * r + CELL * CELL * 0.25) this.blocked[y * this.w + x] = blocked;
+          }
+      }
+    }
   }
 
   /** Makes a demolished building's footprint walkable and see-through (rubble). */

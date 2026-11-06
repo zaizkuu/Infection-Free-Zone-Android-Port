@@ -2,6 +2,7 @@ import type { Camera } from './camera';
 import { MapRenderer, drawVehicle } from './mapRenderer';
 import { makeCanvas } from './textures';
 import { hexA, shade, type Vec } from '../core/math';
+import { polyPath } from '../world/geo';
 import { hash2 } from '../core/rng';
 import type { MapData } from '../world/types';
 import { BUILD_RANGE, FOG_CELL, GUARD_COLOR, SQUAD_COLORS, STRUCTS, VEHICLES, VEH_SEAT, WALL_MAX, WEATHER, ZKINDS, type Structure, hourOf, maxHpOf, nightness, type GameState, type StructKind, type Survivor, type Vehicle, type Zombie } from '../game/state';
@@ -138,15 +139,30 @@ export class WorldRenderer {
       if (b.owned) {
         // barricades
         const lv = b.fort;
-        if (lv >= 1) ring(ctx, d, 3.5, '#8b6b45', 2.6, [5, 2.5]);
-        if (lv >= 2) ring(ctx, d, 7, '#b9a27a', 3.2, [3.5, 1.2]);
-        if (lv >= 3) ring(ctx, d, 10.5, '#7d858c', 2, [2, 1.8]);
-        ctx.strokeStyle = hexA('#ff8a3d', 0.9);
-        ctx.lineWidth = 1.3;
-        ctx.strokeRect(d.x - 0.5, d.y - 0.5, d.w + 1, d.h + 1);
-        ctx.strokeStyle = hexA('#ff8a3d', 0.25);
-        ctx.lineWidth = 4;
-        ctx.strokeRect(d.x - 2, d.y - 2, d.w + 4, d.h + 4);
+        if (d.poly) {
+          // real-world footprint: barricades hug the walls, the glow follows the roof
+          if (lv >= 3) ringPoly(ctx, d.poly, '#7d858c', 10, [2, 1.8]);
+          if (lv >= 2) ringPoly(ctx, d.poly, '#b9a27a', 7, [3.5, 1.2]);
+          if (lv >= 1) ringPoly(ctx, d.poly, '#8b6b45', 4, [5, 2.5]);
+          ctx.beginPath();
+          polyPath(ctx, d.poly, 0, -d.wallH);
+          ctx.strokeStyle = hexA('#ff8a3d', 0.25);
+          ctx.lineWidth = 4;
+          ctx.stroke();
+          ctx.strokeStyle = hexA('#ff8a3d', 0.9);
+          ctx.lineWidth = 1.3;
+          ctx.stroke();
+        } else {
+          if (lv >= 1) ring(ctx, d, 3.5, '#8b6b45', 2.6, [5, 2.5]);
+          if (lv >= 2) ring(ctx, d, 7, '#b9a27a', 3.2, [3.5, 1.2]);
+          if (lv >= 3) ring(ctx, d, 10.5, '#7d858c', 2, [2, 1.8]);
+          ctx.strokeStyle = hexA('#ff8a3d', 0.9);
+          ctx.lineWidth = 1.3;
+          ctx.strokeRect(d.x - 0.5, d.y - 0.5, d.w + 1, d.h + 1);
+          ctx.strokeStyle = hexA('#ff8a3d', 0.25);
+          ctx.lineWidth = 4;
+          ctx.strokeRect(d.x - 2, d.y - 2, d.w + 4, d.h + 4);
+        }
         const max = maxHpOf(this.map, st.b, i);
         if (b.hp < max) bar(ctx, d.x + d.w / 2, d.y - 8, Math.min(d.w, 60), 3, b.hp / max, b.hp / max > 0.5 ? '#7ccf6a' : b.hp / max > 0.25 ? '#f0b44a' : '#e5484d');
         if (i === this.map.hqId) havenBadge(ctx, d.x + d.w / 2, d.y + (d.h - d.wallH) / 2, cam.zoom, now);
@@ -157,16 +173,25 @@ export class WorldRenderer {
         if (l.mat) types.push('#d29a5a');
         if (l.ammo) types.push('#f0d35a');
         if (l.med) types.push('#ef6b6b');
+        if (l.fuel) types.push('#e08a5a');
         if (l.guns) types.push('#b0bec5');
         if (!types.length) {
           ctx.fillStyle = 'rgba(25,28,32,0.28)';
-          ctx.fillRect(d.x, d.y, d.w, d.h);
+          if (d.poly) {
+            ctx.beginPath();
+            polyPath(ctx, d.poly, 0, -d.wallH);
+            ctx.fill();
+          } else ctx.fillRect(d.x, d.y, d.w, d.h);
         } else lootPill(ctx, d.x + d.w / 2, d.y + (d.h - d.wallH) / 2, types, cam.zoom);
         if (b.survivors > 0) personBadge(ctx, d.x + d.w / 2, d.y - 6, cam.zoom);
       }
       if (b.breached && !b.owned) {
         ctx.fillStyle = 'rgba(60,10,10,0.18)';
-        ctx.fillRect(d.x, d.y, d.w, d.h);
+        if (d.poly) {
+          ctx.beginPath();
+          polyPath(ctx, d.poly, 0, -d.wallH);
+          ctx.fill();
+        } else ctx.fillRect(d.x, d.y, d.w, d.h);
       }
     });
 
@@ -210,7 +235,15 @@ export class WorldRenderer {
       if (!b.demo || b.demolished) return;
       const d = this.map.buildings[i];
       if (!inView(d.x + d.w / 2, d.y + d.h / 2, Math.max(d.w, d.h))) return;
-      drawDemolition(ctx, d, b.demo, now, cam.zoom);
+      if (d.poly) {
+        ctx.save();
+        ctx.beginPath();
+        polyPath(ctx, d.poly, 0, -d.wallH);
+        polyPath(ctx, d.poly);
+        ctx.clip();
+        drawDemolition(ctx, d, b.demo, now, cam.zoom);
+        ctx.restore();
+      } else drawDemolition(ctx, d, b.demo, now, cam.zoom);
     });
     // selected abandoned car
     if (view.selectedProp >= 0) {
@@ -1279,4 +1312,22 @@ function drawDemolition(ctx: CanvasRenderingContext2D, d: { id: number; x: numbe
   ctx.fillRect(d.x + d.w / 2 - w / 2 - 1, y - 1, w + 2, 4 * k + 2);
   ctx.fillStyle = `rgba(255,179,107,${0.8 + Math.sin(now * 4) * 0.2})`;
   ctx.fillRect(d.x + d.w / 2 - w / 2, y, w * p, 4 * k);
+}
+
+/** Dashed barricade line around a real-world footprint. */
+function ringPoly(ctx: CanvasRenderingContext2D, poly: Vec[], col: string, lw: number, dash: number[]): void {
+  ctx.setLineDash(dash);
+  ctx.lineJoin = 'round';
+  ctx.beginPath();
+  polyPath(ctx, poly, 0.7, 0.9);
+  ctx.strokeStyle = 'rgba(0,0,0,0.35)';
+  ctx.lineWidth = lw + 1;
+  ctx.stroke();
+  ctx.beginPath();
+  polyPath(ctx, poly);
+  ctx.strokeStyle = col;
+  ctx.lineWidth = lw;
+  ctx.stroke();
+  ctx.setLineDash([]);
+  ctx.lineJoin = 'miter';
 }

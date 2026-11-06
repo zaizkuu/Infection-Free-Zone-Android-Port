@@ -16,8 +16,10 @@ import { Input } from './input';
 import { Sfx } from './audio/sfx';
 import { Music } from './audio/music';
 import { Ui, type App } from './ui/ui';
-import { initPlatform, buzz } from './platform';
+import { initPlatform, buzz, getLocation } from './platform';
 import { clearSave, hasSave, loadGame, loadPrefs, saveGame, savePrefs, type Prefs } from './save';
+import { buildRealMap, fetchOsm, reverseName, searchPlaces, type OsmData, type Place } from './world/osm';
+import { loadMap, saveMap } from './world/mapstore';
 import { DAY_LEN, SQUAD_COLORS, STRUCTS, VEH_SEAT, WALL_MAX, migrate, nightness, newGame, type GameState, type OrderType, type StructKind } from './game/state';
 import { assignSurvivor, build, canBuildAt, canBuildWall, createRuntime, dismantle, fortify, orderSquad, populate, releaseVehicle, salvageInfo, squadMembers, step, stepFx, syncFog, unloadAll, vehicleOf, type Runtime } from './game/sim';
 
@@ -42,6 +44,9 @@ class Game implements App {
   private input: Input;
   private sfx = new Sfx();
   private vehicleProps: Set<number> | null = null;
+  private procMap: MapData;
+  private loadAbort: AbortController | null = null;
+  private procRenderer: WorldRenderer;
   private music = new Music();
   private tension = 0;
   private tensionTimer = 0;
@@ -56,10 +61,10 @@ class Game implements App {
   constructor() {
     this.canvas = document.getElementById('game') as HTMLCanvasElement;
     this.ctx = this.canvas.getContext('2d', { alpha: false })!;
-    this.map = generateMap(SEED);
+    this.map = this.procMap = generateMap(SEED);
     const fogW = Math.ceil(this.map.width / 40);
     const fogH = Math.ceil(this.map.height / 40);
-    this.renderer = new WorldRenderer(this.map, fogW, fogH);
+    this.renderer = this.procRenderer = new WorldRenderer(this.map, fogW, fogH);
     this.renderer.mapR.warmup();
     this.cam = new Camera(this.map.width, this.map.height);
     this.input = new Input(
@@ -100,7 +105,12 @@ class Game implements App {
     try {
       const { App: CapApp } = await import('@capacitor/app');
       await CapApp.addListener('backButton', () => {
-        if (this.mode !== 'play') return void CapApp.exitApp();
+        if (this.mode !== 'play') {
+          const sc = this.ui.currentScreen;
+          if (sc === 'loading') return this.cancelLoad();
+          if (sc === 'mappick' || sc === 'howto' || sc === 'settings') return this.ui.showTitle();
+          return void CapApp.exitApp();
+        }
         if (this.view.placing) return this.cancelPlace();
         if (this.ui.panelOpen) return this.ui.closePanel();
         if (this.ui.screenOpen) {
@@ -135,7 +145,12 @@ class Game implements App {
     const nav = new NavGrid(this.map);
     const rt = createRuntime(this.map, nav, st);
     // the world as this save left it: demolished buildings and scrapped cars
-    st.b.forEach((b, i) => b.demolished && nav.clearRect(this.map.buildings[i]));
+    st.b.forEach((b, i) => {
+      if (!b.demolished) return;
+      const d = this.map.buildings[i];
+      if (d.poly) nav.markPoly(d.poly, 0, 0);
+      else nav.clearRect(d);
+    });
     for (const pi of st.salvaged) nav.clearProp(this.map.props[pi]);
     for (const s of st.structures) {
       if (s.built >= 1 && (s.kind === 'tower' || s.kind === 'workshop' || s.kind === 'infirmary')) {
@@ -147,6 +162,7 @@ class Game implements App {
   }
 
   private startDemo(): void {
+    this.useMap(this.procMap);
     const st = newGame(this.map, SEED + 99);
     st.time = DAY_LEN * (15.5 / 24); // 21:30
     st.lastHour = 21.5;
@@ -171,8 +187,101 @@ class Game implements App {
     this.demoT = 0;
   }
 
+  /** Switches the world being played and its renderer. */
+  private useMap(map: MapData): void {
+    if (this.map === map) return;
+    this.map = map;
+    if (map === this.procMap) this.renderer = this.procRenderer;
+    else {
+      this.renderer = new WorldRenderer(map, Math.ceil(map.width / 40), Math.ceil(map.height / 40));
+      this.renderer.mapR.warmup();
+    }
+    this.cam.mapW = map.width;
+    this.cam.mapH = map.height;
+    this.vehicleProps = null;
+    this.resize();
+  }
+
+  /** Starts a game on a real-world map built from OpenStreetMap data. */
+  startRealGame(map: MapData): void {
+    clearSave();
+    this.useMap(map);
+    const st = newGame(map, map.seed);
+    st.mapRef = { lat: map.real!.lat, lon: map.real!.lon, name: map.real!.name };
+    const rt = this.freshRuntime(st);
+    populate(st, rt, Math.round(150 + Math.min(130, map.buildings.length / 12)));
+    this.begin(st, rt);
+    void saveMap(map);
+    this.ui.banner('Day 1', `${map.townName} has fallen. Your haven is ${map.buildings[map.hqId].name}. The dead come at night.`, 'info');
+  }
+
+  search(q: string): Promise<Place[]> {
+    return searchPlaces(q);
+  }
+
+  /** Downloads the area around a place from OpenStreetMap and starts a game there. */
+  pickPlace(place: Place): void {
+    this.loadAbort?.abort();
+    const ctl = new AbortController();
+    this.loadAbort = ctl;
+    this.ui.showLoading(place.name, 'Downloading map data…');
+    fetchOsm(place.lat, place.lon, (m) => this.ui.setLoadingStatus(m), ctl.signal)
+      .then((data) => {
+        if (ctl.signal.aborted) return;
+        this.ui.setLoadingStatus('Building the town…');
+        setTimeout(() => {
+          if (ctl.signal.aborted) return;
+          this.loadAbort = null;
+          try {
+            this.startRealGame(buildRealMap(data, place));
+          } catch (e) {
+            this.ui.showMapPicker({ error: e instanceof Error ? e.message : 'Could not build a town here.' });
+          }
+        }, 30);
+      })
+      .catch((e: unknown) => {
+        if (ctl.signal.aborted) return;
+        this.loadAbort = null;
+        this.ui.showMapPicker({ error: e instanceof Error ? e.message : 'Download failed.' });
+      });
+  }
+
+  async useMyLocation(): Promise<void> {
+    this.loadAbort?.abort();
+    const ctl = new AbortController();
+    this.loadAbort = ctl;
+    this.ui.showLoading('Your location', 'Finding where you are…');
+    try {
+      const pos = await getLocation();
+      if (ctl.signal.aborted) return;
+      let name = 'Your neighbourhood';
+      try {
+        name = await reverseName(pos.lat, pos.lon);
+      } catch {
+        /* keep the generic name */
+      }
+      if (ctl.signal.aborted) return;
+      this.loadAbort = null;
+      this.pickPlace({ lat: pos.lat, lon: pos.lon, name });
+    } catch {
+      if (!ctl.signal.aborted) this.ui.showMapPicker({ error: "Couldn't get your location. Allow location access, or search for a place instead." });
+    }
+  }
+
+  cancelLoad(): void {
+    this.loadAbort?.abort();
+    this.loadAbort = null;
+    this.ui.showMapPicker();
+  }
+
+  /** Converts downloaded OSM data and starts playing it. */
+  playOsm(data: OsmData, place: Place): void {
+    this.startRealGame(buildRealMap(data, place));
+  }
+
   newGame(): void {
     clearSave();
+    this.useMap(this.procMap);
     const st = newGame(this.map, SEED);
     const rt = this.freshRuntime(st);
     populate(st, rt, 175);
@@ -180,9 +289,17 @@ class Game implements App {
     this.ui.banner('Day 1', `${this.map.townName} has fallen. Scout the neighbourhood and get ready. The dead come at night.`, 'info');
   }
 
-  continueGame(): void {
+  async continueGame(): Promise<void> {
     const saved = loadGame();
     if (!saved) return this.newGame();
+    if (saved.mapRef) {
+      const map = await loadMap();
+      if (!map || !map.real || Math.abs(map.real.lat - saved.mapRef.lat) > 1e-6 || Math.abs(map.real.lon - saved.mapRef.lon) > 1e-6) {
+        this.ui.showTitle(`The map for ${saved.mapRef.name} is no longer on this device. Start a new game there to download it again.`);
+        return;
+      }
+      this.useMap(map);
+    } else this.useMap(this.procMap);
     const st = migrate(saved, this.map);
     const rt = this.freshRuntime(st);
     this.begin(st, rt);
@@ -644,6 +761,11 @@ async function boot(): Promise<void> {
   const game = new Game();
   (window as unknown as { __game: Game }).__game = game;
   if (import.meta.env.DEV) {
+    // test hook: play a saved Overpass JSON file as a real-world map
+    (window as unknown as { __loadFixture: (url: string, place: Place) => Promise<void> }).__loadFixture = async (url, place) => {
+      const data = (await (await fetch(url)).json()) as OsmData;
+      game.playOsm(data, place);
+    };
     // test hook: advance the simulation quickly
     (window as unknown as { __advance: (s: number) => number }).__advance = (secs: number) => {
       const t0 = performance.now();

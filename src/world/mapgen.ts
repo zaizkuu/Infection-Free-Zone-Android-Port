@@ -33,11 +33,11 @@ const TOWN_NAMES = ['Ashbury', 'Millbrook', 'Harlow Creek', 'Stonebridge', 'West
 const V_STREETS = ['Alder', 'Birch', 'Cedar', 'Dogwood', 'Elm', 'Hawthorn', 'Juniper', 'Linden', 'Poplar', 'Willow', 'Sycamore'];
 const H_STREETS = ['Railway', 'Mill', 'Church', 'Market', 'Union', 'Garden', 'Harbor', 'Ridge', 'Summit', 'Valley', 'Orchard'];
 
-const HOUSE_ROOFS = ['#3b3d40', '#4a3f37', '#45494f', '#5a4636', '#6b4436', '#4d5148', '#5e5a52', '#3f3a35', '#6e4f3c'];
-const HOUSE_WALLS = ['#a49a88', '#9b9483', '#8d8b84', '#a8977c', '#958a7a', '#b0a690', '#8a8478', '#a39c8e'];
-const FLAT_ROOFS = ['#5d5e5c', '#676661', '#555756', '#6e6b64', '#4f5251', '#605d57'];
-const SHOP_WALLS = ['#8a6e57', '#7a6250', '#958a7a', '#776d63', '#8c7b66', '#6b625a', '#8f7559'];
-const CAR_COLORS = ['#6a2a2a', '#2a3a4c', '#a9a8a2', '#232426', '#55575a', '#6e6440', '#2d4234', '#8a8d90', '#4a3a4c', '#7a5232'];
+export const HOUSE_ROOFS = ['#3b3d40', '#4a3f37', '#45494f', '#5a4636', '#6b4436', '#4d5148', '#5e5a52', '#3f3a35', '#6e4f3c'];
+export const HOUSE_WALLS = ['#a49a88', '#9b9483', '#8d8b84', '#a8977c', '#958a7a', '#b0a690', '#8a8478', '#a39c8e'];
+export const FLAT_ROOFS = ['#5d5e5c', '#676661', '#555756', '#6e6b64', '#4f5251', '#605d57'];
+export const SHOP_WALLS = ['#8a6e57', '#7a6250', '#958a7a', '#776d63', '#8c7b66', '#6b625a', '#8f7559'];
+export const CAR_COLORS = ['#6a2a2a', '#2a3a4c', '#a9a8a2', '#232426', '#55575a', '#6e6440', '#2d4234', '#8a8d90', '#4a3a4c', '#7a5232'];
 
 interface Cell {
   i: number;
@@ -51,6 +51,7 @@ interface Cell {
 }
 
 export function riverXAt(river: River, y: number): number {
+  if (river.pts.length < 2) return -1e9;
   const t = (y - river.y0) / river.step;
   const i = clamp(Math.floor(t), 0, river.pts.length - 2);
   const f = clamp(t - i, 0, 1);
@@ -58,6 +59,7 @@ export function riverXAt(river: River, y: number): number {
 }
 
 export function inRiver(river: River, x: number, y: number, pad = 0): boolean {
+  if (river.pts.length < 2) return false;
   return Math.abs(x - riverXAt(river, y)) < river.w / 2 + pad;
 }
 
@@ -978,7 +980,7 @@ export function generateMap(seed: number): MapData {
 
 // ---- tables ---------------------------------------------------------------
 
-const CAPACITY: Record<BuildingKind, number> = {
+export const CAPACITY: Record<BuildingKind, number> = {
   house: 3,
   bungalow: 2,
   apartment: 8,
@@ -1000,7 +1002,7 @@ const CAPACITY: Record<BuildingKind, number> = {
   barn: 3,
 };
 
-function defaultName(kind: BuildingKind, rng: Rng): string {
+export function defaultName(kind: BuildingKind, rng: Rng): string {
   switch (kind) {
     case 'house':
       return rng.pick(['Family Home', 'Two-Storey House', 'Townhouse', 'Duplex']);
@@ -1052,7 +1054,7 @@ const LOOT: Record<BuildingKind, LootSpec> = {
   barn: { food: [6, 12], mat: [6, 12] },
 };
 
-function rollLoot(kind: BuildingKind, rng: Rng): Loot {
+export function rollLoot(kind: BuildingKind, rng: Rng): Loot {
   const spec = LOOT[kind];
   const l: Loot = { food: 0, mat: 0, ammo: 0, med: 0, guns: 0, fuel: 0 };
   for (const k of Object.keys(spec) as (keyof Loot)[]) {
@@ -1085,7 +1087,7 @@ const INFECTED: Record<BuildingKind, [number, number, number]> = {
   barn: [1, 2, 0.4],
 };
 
-function rollInfected(kind: BuildingKind, rng: Rng): number {
+export function rollInfected(kind: BuildingKind, rng: Rng): number {
   const [a, b, p] = INFECTED[kind];
   return rng.chance(p) ? rng.int(a, b) : 0;
 }
@@ -1104,7 +1106,7 @@ const SURVIVORS: Partial<Record<BuildingKind, [number, number, number]>> = {
   warehouse: [1, 2, 0.2],
 };
 
-function rollSurvivors(kind: BuildingKind, rng: Rng): number {
+export function rollSurvivors(kind: BuildingKind, rng: Rng): number {
   const s = SURVIVORS[kind];
   if (!s) return 0;
   return rng.chance(s[2]) ? rng.int(s[0], s[1]) : 0;

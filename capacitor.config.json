@@ -9,6 +9,11 @@
     "webContentsDebuggingEnabled": false
   },
   "plugins": {
-    "StatusBar": { "overlaysWebView": true, "style": "DARK", "backgroundColor": "#00000000" }
-  }
+    "StatusBar": {
+      "overlaysWebView": true,
+      "style": "DARK",
+      "backgroundColor": "#00000000"
+    }
+  },
+  "appendUserAgent": "EmberHaven/0.5 (github.com/zaizkuu/Infection-Free-Zone-Android-Port)"
 }

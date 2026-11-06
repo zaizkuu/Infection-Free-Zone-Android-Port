@@ -245,6 +245,8 @@ export interface GameState {
   weather: Weather;
   /** map prop indices of cars that were scrapped */
   salvaged: number[];
+  /** set when the game is played on a real-world (OpenStreetMap) map */
+  mapRef?: { lat: number; lon: number; name: string };
 }
 
 const NAMES = [

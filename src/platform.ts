@@ -27,3 +27,25 @@ export async function buzz(kind: 'light' | 'heavy' = 'light'): Promise<void> {
     /* ignore */
   }
 }
+
+/** The device's approximate position (asks for permission on Android). */
+export async function getLocation(): Promise<{ lat: number; lon: number }> {
+  if (Capacitor.isNativePlatform()) {
+    const { Geolocation } = await import('@capacitor/geolocation');
+    const perm = await Geolocation.checkPermissions();
+    if (perm.location !== 'granted' && perm.coarseLocation !== 'granted') {
+      const req = await Geolocation.requestPermissions({ permissions: ['location', 'coarseLocation'] });
+      if (req.location !== 'granted' && req.coarseLocation !== 'granted') throw new Error('Location permission denied');
+    }
+    const pos = await Geolocation.getCurrentPosition({ enableHighAccuracy: false, timeout: 20000, maximumAge: 600000 });
+    return { lat: pos.coords.latitude, lon: pos.coords.longitude };
+  }
+  return new Promise((resolve, reject) => {
+    if (!navigator.geolocation) return reject(new Error('Location is not available'));
+    navigator.geolocation.getCurrentPosition(
+      (p) => resolve({ lat: p.coords.latitude, lon: p.coords.longitude }),
+      (e) => reject(new Error(e.message)),
+      { enableHighAccuracy: false, timeout: 20000, maximumAge: 600000 },
+    );
+  });
+}

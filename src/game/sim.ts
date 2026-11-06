@@ -105,6 +105,8 @@ export interface Runtime {
   /** per nav cell: id of a finished wall standing there, or -1 */
   wallAt: Int32Array;
   wallsDirty: boolean;
+  /** ids of haven buildings, refreshed every step (real maps have thousands of buildings) */
+  owned: number[];
 }
 
 const ZCELL = 50;
@@ -146,6 +148,7 @@ export function createRuntime(map: MapData, nav: NavGrid, st: GameState): Runtim
     survById: new Map(),
     wallAt: new Int32Array(nav.w * nav.h).fill(-1),
     wallsDirty: true,
+    owned: [],
   };
 }
 
@@ -244,9 +247,8 @@ export function ownedIds(st: GameState): number[] {
 
 export function distToBase(st: GameState, rt: Runtime, x: number, y: number): number {
   let best = Infinity;
-  st.b.forEach((b, i) => {
-    if (b.owned) best = Math.min(best, distToRect(rt.map.buildings[i], x, y));
-  });
+  const ids = rt.owned.length ? rt.owned : ownedIds(st);
+  for (const i of ids) if (st.b[i].owned) best = Math.min(best, distToRect(rt.map.buildings[i], x, y));
   return best;
 }
 
@@ -999,7 +1001,8 @@ function finishDemolition(st: GameState, rt: Runtime, id: number): void {
   bs.demo = 1;
   bs.survivors = 0;
   bs.infected = 0;
-  rt.nav.clearRect(d);
+  if (d.poly) rt.nav.markPoly(d.poly, 0, 0);
+  else rt.nav.clearRect(d);
   rt.flowDirty = true;
   if (wasOwned) rt.postsDirty = true;
   for (const q of st.squads) if (q.order.b === id) q.order = { t: 'idle' };
@@ -1701,7 +1704,7 @@ function attackBase(st: GameState, rt: Runtime, z: Zombie): void {
       return;
     }
   }
-  for (let i = 0; i < st.b.length; i++) {
+  for (const i of rt.owned.length ? rt.owned : ownedIds(st)) {
     const bs = st.b[i];
     if (!bs.owned) continue;
     const d = rt.map.buildings[i];
@@ -2126,6 +2129,7 @@ export function step(st: GameState, rt: Runtime, dt: number): void {
   updateTime(st, rt, dt);
   if (st.over) return;
   _st = st;
+  rt.owned = ownedIds(st);
   if (rt.wallsDirty) rebuildWalls(st, rt);
   if (rt.flowDirty) rebuildFlow(st, rt);
   rebuildZGrid(st, rt);

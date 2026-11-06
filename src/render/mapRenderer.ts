@@ -1,4 +1,5 @@
-import type { Area, BuildingDef, Fence, MapData, Prop, Road } from '../world/types';
+import type { Area, BuildingDef, Fence, MapData, Prop, Road, WaterBody, Way } from '../world/types';
+import { centroid, linePath, pointInPoly, polyBounds, polyPath } from '../world/geo';
 import { buildTextures, makeCanvas, worldPattern, type Textures } from './textures';
 import { hash2 } from '../core/rng';
 import { clamp, mixHex, shade, type Rect } from '../core/math';
@@ -63,6 +64,10 @@ const AREA_ORDER: Record<string, number> = {
   crops: 0,
   dirt: 1,
   lot: 1,
+  tint: -1,
+  forest: 1,
+  sand: 1,
+  wetland: 1,
   lawn: 2,
   park: 2,
   field: 2,
@@ -105,6 +110,10 @@ export class MapRenderer {
   private propIdx: SpatialIndex;
   private bldIdx: SpatialIndex;
   private fenceIdx: SpatialIndex;
+  private ways: Way[];
+  private wayIdx: SpatialIndex;
+  private water: WaterBody[];
+  private waterIdx: SpatialIndex;
   private areas: Area[];
   private props: Prop[];
   private fences: Fence[];
@@ -188,7 +197,12 @@ export class MapRenderer {
       minX = Math.min(minX, p.x);
       maxX = Math.max(maxX, p.x);
     }
-    this.riverBounds = { x: minX - rv.w, y: -100, w: maxX - minX + rv.w * 2, h: map.height + 200 };
+    this.riverBounds = rv.pts.length ? { x: minX - rv.w, y: -100, w: maxX - minX + rv.w * 2, h: map.height + 200 } : { x: -1e6, y: 0, w: 0, h: 0 };
+    // real-world roads & water
+    this.ways = map.ways ?? [];
+    this.wayIdx = new SpatialIndex(this.ways.map((w) => ({ b: pad(polyBounds(w.pts), w.w / 2 + 14) })), map.width, map.height);
+    this.water = map.water ?? [];
+    this.waterIdx = new SpatialIndex(this.water.map((w) => ({ b: pad(polyBounds(w.poly ?? w.line ?? []), (w.w ?? 0) / 2 + 14) })), map.width, map.height);
   }
 
   /** Soft shadows on/off (battery saver). Clears the tile cache when it changes. */
@@ -358,6 +372,8 @@ export class MapRenderer {
     for (const i of this.areaIdx.query(r)) this.drawArea(g, this.areas[i], scale);
 
     if (r.x < this.riverBounds.x + this.riverBounds.w && r.x + r.w > this.riverBounds.x) this.drawRiver(g, scale);
+    if (this.water.length) this.drawWater(g, r, scale);
+    if (this.ways.length) this.drawWays(g, r, scale);
 
     for (const b of this.map.bridges) {
       if (!intersects(b, r)) continue;
@@ -430,7 +446,8 @@ export class MapRenderer {
       g.beginPath();
       for (const i of bldIds) {
         const b = this.buildings[i];
-        g.rect(b.x - 2.5, b.y - 2.5, b.w + 5, b.h + 5);
+        if (b.poly) polyPath(g, b.poly);
+        else g.rect(b.x - 2.5, b.y - 2.5, b.w + 5, b.h + 5);
       }
       for (const i of propIds) {
         const p = this.props[i];
@@ -448,6 +465,10 @@ export class MapRenderer {
         const b = this.buildings[i];
         const sx = b.wallH * 1.45;
         const sy = b.wallH * 1.05;
+        if (b.poly) {
+          for (let k = 1; k <= 4; k++) polyPath(g, b.poly, (sx * k) / 4, (sy * k) / 4);
+          continue;
+        }
         g.moveTo(b.x, b.y);
         g.lineTo(b.x + b.w, b.y);
         g.lineTo(b.x + b.w + sx, b.y + sy);
@@ -496,7 +517,11 @@ export class MapRenderer {
       const p = this.props[i];
       if (GROUND_PROPS.has(p.kind)) this.drawProp(g, p, scale);
     }
-    for (const i of bldIds) this.drawBuilding(g, this.buildings[i], scale);
+    for (const i of bldIds) {
+      const b = this.buildings[i];
+      if (b.poly) this.drawBuildingPoly(g, b, scale);
+      else this.drawBuilding(g, b, scale);
+    }
     for (const i of propIds) {
       const p = this.props[i];
       if (p.kind === 'canopy') this.drawProp(g, p, scale);
@@ -820,6 +845,16 @@ export class MapRenderer {
   }
 
   private drawArea(g: CanvasRenderingContext2D, a: Area, scale: number): void {
+    if (!a.poly) return this.drawAreaRect(g, a, scale);
+    g.save();
+    g.beginPath();
+    polyPath(g, a.poly);
+    g.clip();
+    this.drawAreaRect(g, a, scale);
+    g.restore();
+  }
+
+  private drawAreaRect(g: CanvasRenderingContext2D, a: Area, scale: number): void {
     const T = this.tex;
     const grassOver = (alpha: number) => {
       if (scale < 0.5) return;
@@ -889,7 +924,9 @@ export class MapRenderer {
         g.beginPath();
         const stallW = 12;
         const stallD = 22;
-        if (!a.o) {
+        if (a.o === 2) {
+          // real-world lots: no painted stalls
+        } else if (!a.o) {
           for (let row = 0; row * stallD + stallD <= a.h; row++) {
             if (row % 3 === 2) continue;
             for (let x = a.x + 4; x <= a.x + a.w - 2; x += stallW) {
@@ -1041,6 +1078,45 @@ export class MapRenderer {
         }
         break;
       }
+      case 'tint': {
+        // real-world land use: lived-in yards, paved commercial, worn industrial
+        g.fillStyle = a.v === 0 ? 'rgba(66,80,46,0.45)' : a.v === 1 ? '#5a5853' : '#535049';
+        g.fillRect(a.x, a.y, a.w, a.h);
+        if (a.v !== 0 && scale >= 0.5) {
+          g.globalAlpha = 0.75;
+          g.fillStyle = worldPattern(g, T.concrete);
+          g.fillRect(a.x, a.y, a.w, a.h);
+          g.globalAlpha = 1;
+          this.stains(g, a, a.v === 2 ? 900 : 1800, 'rgba(10,10,10,0.2)');
+        }
+        break;
+      }
+      case 'forest':
+        g.fillStyle = '#2b371f';
+        g.fillRect(a.x, a.y, a.w, a.h);
+        grassOver(0.45);
+        break;
+      case 'sand':
+        g.fillStyle = '#857959';
+        g.fillRect(a.x, a.y, a.w, a.h);
+        if (scale >= 0.5) {
+          g.globalAlpha = 0.6;
+          g.fillStyle = worldPattern(g, T.dirt);
+          g.fillRect(a.x, a.y, a.w, a.h);
+          g.globalAlpha = 1;
+        }
+        break;
+      case 'wetland':
+        g.fillStyle = '#3a4630';
+        g.fillRect(a.x, a.y, a.w, a.h);
+        grassOver(0.5);
+        g.fillStyle = 'rgba(40,62,66,0.5)';
+        for (let i = 0; i < (a.w * a.h) / 1500; i++) {
+          g.beginPath();
+          g.ellipse(a.x + hash2(i, 1, Math.round(a.x)) * a.w, a.y + hash2(i, 2, Math.round(a.y)) * a.h, 4 + hash2(i, 3, 7) * 9, 2 + hash2(i, 4, 7) * 5, hash2(i, 5, 7) * 3, 0, Math.PI * 2);
+          g.fill();
+        }
+        break;
       case 'pool': {
         g.fillStyle = '#77736a';
         g.fillRect(a.x - 2, a.y - 2, a.w + 4, a.h + 4);
@@ -1538,8 +1614,312 @@ export class MapRenderer {
     g.fillRect(x, y + b.h - 0.9, w, 0.9);
   }
 
+
+  // ---------------------------------------------------------------- real-world maps
+
+  private drawWater(g: CanvasRenderingContext2D, r: Rect, scale: number): void {
+    const ids = this.waterIdx.query(r);
+    if (!ids.length) return;
+    const list = ids.map((i) => this.water[i]);
+    blurred(g, 3 * scale, () => {
+      g.strokeStyle = '#4a4331';
+      g.fillStyle = '#4a4331';
+      g.lineJoin = 'round';
+      g.lineCap = 'round';
+      for (const w of list) {
+        g.beginPath();
+        if (w.poly) {
+          polyPath(g, w.poly);
+          g.lineWidth = 12;
+          g.stroke();
+        } else if (w.line) {
+          linePath(g, w.line);
+          g.lineWidth = (w.w ?? 4) + 10;
+          g.stroke();
+        }
+      }
+    });
+    for (const w of list) {
+      g.beginPath();
+      if (w.poly) {
+        polyPath(g, w.poly);
+        g.fillStyle = '#31474a';
+        g.fill();
+        g.strokeStyle = '#3a4a2a';
+        g.lineWidth = 3;
+        g.stroke();
+      } else if (w.line) {
+        linePath(g, w.line);
+        g.strokeStyle = '#34494c';
+        g.lineWidth = w.w ?? 4;
+        g.stroke();
+      }
+    }
+    if (scale >= 0.5) {
+      g.save();
+      g.beginPath();
+      for (const w of list) if (w.poly) polyPath(g, w.poly);
+      g.clip();
+      g.fillStyle = worldPattern(g, this.tex.water);
+      g.fillRect(r.x, r.y, r.w, r.h);
+      g.restore();
+    }
+    g.lineCap = 'butt';
+  }
+
+  private drawWays(g: CanvasRenderingContext2D, r: Rect, scale: number): void {
+    const list = this.wayIdx.query(r).map((i) => this.ways[i]);
+    if (!list.length) return;
+    const T = this.tex;
+    const stroke = (w: Way, width: number, style: string | CanvasPattern, dash?: number[]) => {
+      g.beginPath();
+      linePath(g, w.pts);
+      g.lineWidth = width;
+      g.strokeStyle = style;
+      if (dash) g.setLineDash(dash);
+      g.stroke();
+      if (dash) g.setLineDash([]);
+    };
+    g.lineJoin = 'round';
+    g.lineCap = 'round';
+    const roads = list.filter((w) => w.kind !== 'path');
+    const paths = list.filter((w) => w.kind === 'path');
+    // bridge decks & their shadows over water
+    for (const w of roads) {
+      if (!w.bridge) continue;
+      blurred(g, 3 * scale, () => {
+        g.save();
+        g.translate(4, 6);
+        stroke(w, w.w + 10, 'rgba(5,12,14,0.55)');
+        g.restore();
+      });
+      stroke(w, w.w + 10, '#5f5d58');
+    }
+    // paths first (they run under streets)
+    for (const w of paths) stroke(w, w.w + 1.2, 'rgba(0,0,0,0.25)');
+    for (const w of paths) stroke(w, w.w, w.bridge ? '#6c6a63' : '#6d6553');
+    // sidewalks
+    for (const w of roads) if (w.kind === 'major' || w.kind === 'minor') stroke(w, w.w + 14, '#6c6a63');
+    if (scale >= 0.5) {
+      g.globalAlpha = 0.8;
+      const pat = worldPattern(g, T.concrete);
+      for (const w of roads) if (w.kind === 'major' || w.kind === 'minor') stroke(w, w.w + 14, pat);
+      g.globalAlpha = 1;
+    }
+    // curbs, then asphalt
+    for (const w of roads) if (w.kind !== 'pedestrian') stroke(w, w.w + 1.6, '#17181a');
+    for (const w of roads) stroke(w, w.w, w.kind === 'pedestrian' ? '#6f695f' : w.kind === 'major' ? '#26282b' : w.kind === 'minor' ? '#2b2d30' : '#323438');
+    if (scale >= 0.5) {
+      const pat = worldPattern(g, T.asphalt);
+      for (const w of roads) if (w.kind !== 'pedestrian') stroke(w, w.w, pat);
+      g.globalAlpha = 0.8;
+      const conc = worldPattern(g, T.concrete);
+      for (const w of roads) if (w.kind === 'pedestrian') stroke(w, w.w, conc);
+      g.globalAlpha = 1;
+      // worn centre & faded markings
+      g.lineCap = 'butt';
+      for (const w of roads) if (w.kind === 'major' || w.kind === 'minor') stroke(w, 3, 'rgba(0,0,0,0.14)');
+      for (const w of roads) {
+        if (w.kind === 'major') stroke(w, 1, 'rgba(176,146,70,0.5)', [9, 5]);
+        else if (w.kind === 'minor') stroke(w, 0.9, 'rgba(190,180,140,0.3)', [10, 12]);
+      }
+    }
+    if (scale >= 0.5) for (const w of roads) if (w.bridge) {
+      stroke(w, w.w + 10, 'rgba(139,136,127,0.9)', [1.4, 6.6]);
+    }
+    g.lineCap = 'butt';
+    g.lineJoin = 'miter';
+  }
+
+  /** A building from a real-world footprint, drawn in the same 3/4 view as the town generator's. */
+  private drawBuildingPoly(g: CanvasRenderingContext2D, b: BuildingDef, scale: number): void {
+    const P = b.poly!;
+    const H = b.wallH;
+    const n = P.length;
+    let s2 = 0;
+    for (let i = 0; i < n; i++) {
+      const a = P[i];
+      const c = P[(i + 1) % n];
+      s2 += a.x * c.y - c.x * a.y;
+    }
+    const sign = s2 > 0 ? 1 : -1;
+    const h = (k: number) => hash2(b.id, k, 77);
+    // walls that face the viewer (south-ish), back to front
+    const walls: [number, number, number][] = [];
+    for (let i = 0; i < n; i++) {
+      const a = P[i];
+      const c = P[(i + 1) % n];
+      const dx = c.x - a.x;
+      const dy = c.y - a.y;
+      const len = Math.hypot(dx, dy) || 1;
+      const nx = (dy / len) * sign;
+      const ny = (-dx / len) * sign;
+      if (ny > 0.02) walls.push([i, nx, Math.max(a.y, c.y)]);
+    }
+    walls.sort((p, q) => p[2] - q[2]);
+    for (const [i, nx] of walls) {
+      const a = P[i];
+      const c = P[(i + 1) % n];
+      g.fillStyle = shade(b.wallColor, -0.4 - nx * 0.12);
+      g.beginPath();
+      g.moveTo(a.x, a.y);
+      g.lineTo(c.x, c.y);
+      g.lineTo(c.x, c.y - H);
+      g.lineTo(a.x, a.y - H);
+      g.closePath();
+      g.fill();
+      const len = Math.hypot(c.x - a.x, c.y - a.y);
+      if (scale >= 0.7 && H >= 6 && len >= 9) {
+        const ux = (c.x - a.x) / len;
+        const uy = (c.y - a.y) / len;
+        const floors = Math.max(1, Math.floor(H / 6.5));
+        const fh = H / floors;
+        let k = i * 31;
+        for (let f = 0; f < floors; f++)
+          for (let t = 3; t + 4.5 < len - 2; t += 9) {
+            const r = h(100 + k++);
+            const x0 = a.x + ux * t;
+            const y0 = a.y + uy * t - H + f * fh + fh * 0.28;
+            g.fillStyle = r < 0.16 ? '#4a3c2c' : r < 0.28 ? '#08090a' : '#161b20';
+            g.beginPath();
+            g.moveTo(x0, y0);
+            g.lineTo(x0 + ux * 4.5, y0 + uy * 4.5);
+            g.lineTo(x0 + ux * 4.5, y0 + uy * 4.5 + fh * 0.45);
+            g.lineTo(x0, y0 + fh * 0.45);
+            g.closePath();
+            g.fill();
+          }
+      }
+      // grime at the base
+      g.strokeStyle = 'rgba(8,6,5,0.35)';
+      g.lineWidth = 1.4;
+      g.beginPath();
+      g.moveTo(a.x, a.y - 0.7);
+      g.lineTo(c.x, c.y - 0.7);
+      g.stroke();
+    }
+    // roof
+    const rc = b.roofColor;
+    g.save();
+    g.beginPath();
+    polyPath(g, P, 0, -H);
+    g.clip();
+    const bb = polyBounds(P);
+    const rx = bb.x;
+    const ry = bb.y - H;
+    g.fillStyle = rc;
+    g.fillRect(rx - 1, ry - 1, bb.w + 2, bb.h + 2);
+    if (b.ridge !== undefined) {
+      const c0 = centroid(P);
+      const cx = c0.x;
+      const cy = c0.y - H;
+      const dx = Math.cos(b.ridge);
+      const dy = Math.sin(b.ridge);
+      let nx = -dy;
+      let ny = dx;
+      if (nx * -1 + ny * -1 < 0) {
+        nx = -nx;
+        ny = -ny;
+      }
+      const L = 400;
+      g.fillStyle = shade(rc, 0.08);
+      g.beginPath();
+      g.moveTo(cx - dx * L, cy - dy * L);
+      g.lineTo(cx + dx * L, cy + dy * L);
+      g.lineTo(cx + dx * L + nx * L, cy + dy * L + ny * L);
+      g.lineTo(cx - dx * L + nx * L, cy - dy * L + ny * L);
+      g.closePath();
+      g.fill();
+      g.fillStyle = shade(rc, -0.24);
+      g.beginPath();
+      g.moveTo(cx - dx * L, cy - dy * L);
+      g.lineTo(cx + dx * L, cy + dy * L);
+      g.lineTo(cx + dx * L - nx * L, cy + dy * L - ny * L);
+      g.lineTo(cx - dx * L - nx * L, cy - dy * L - ny * L);
+      g.closePath();
+      g.fill();
+      if (scale >= 1) {
+        g.strokeStyle = shade(rc, -0.5);
+        g.globalAlpha = 0.28;
+        g.lineWidth = 0.4;
+        g.beginPath();
+        for (let o = -60; o <= 60; o += 1.8) {
+          g.moveTo(cx - dx * L + nx * o, cy - dy * L + ny * o);
+          g.lineTo(cx + dx * L + nx * o, cy + dy * L + ny * o);
+        }
+        g.stroke();
+        g.globalAlpha = 1;
+      }
+      g.strokeStyle = shade(rc, 0.18);
+      g.lineWidth = 1.2;
+      g.beginPath();
+      g.moveTo(cx - dx * L, cy - dy * L);
+      g.lineTo(cx + dx * L, cy + dy * L);
+      g.stroke();
+    } else if (scale >= 0.5) {
+      g.globalAlpha = 0.8;
+      g.fillStyle = worldPattern(g, this.tex.gravel);
+      g.fillRect(rx, ry, bb.w, bb.h);
+      g.globalAlpha = 1;
+      // rooftop plant on bigger flat roofs
+      const units = Math.min(8, Math.floor((bb.w * bb.h) / 1500));
+      for (let k = 0; k < units; k++) {
+        const ax = rx + 4 + h(30 + k) * (bb.w - 12);
+        const ay = ry + 4 + h(40 + k) * (bb.h - 12);
+        if (!pointInPoly(P, ax + 3.5, ay + 3 + H)) continue;
+        g.fillStyle = 'rgba(0,0,0,0.4)';
+        g.fillRect(ax + 2, ay + 1.6, 7, 6);
+        g.fillStyle = '#6a6c69';
+        g.fillRect(ax, ay, 7, 6);
+        g.fillStyle = '#82847f';
+        g.fillRect(ax, ay, 7, 1.6);
+        g.fillStyle = '#1b1c1c';
+        g.beginPath();
+        g.arc(ax + 3.4, ay + 3.4, 1.9, 0, Math.PI * 2);
+        g.fill();
+      }
+    }
+    if (scale >= 0.7) {
+      g.globalAlpha = 0.9;
+      g.fillStyle = worldPattern(g, this.tex.grain);
+      g.fillRect(rx, ry, bb.w, bb.h);
+      g.globalAlpha = 1;
+    }
+    if (h(5) < 0.1 && b.kind !== 'firestation') {
+      const c0 = centroid(P);
+      blurred(g, 3 * scale, () => {
+        g.fillStyle = 'rgba(12,10,9,0.55)';
+        g.beginPath();
+        g.ellipse(c0.x, c0.y - H, Math.min(bb.w, bb.h) * 0.3, Math.min(bb.w, bb.h) * 0.2, h(8) * 3, 0, Math.PI * 2);
+        g.fill();
+      });
+    }
+    // parapet rim (flat) or eaves line (pitched), clipped inside the roof
+    g.strokeStyle = b.ridge === undefined ? shade(rc, 0.14) : shade(rc, -0.3);
+    g.lineWidth = b.ridge === undefined ? 3 : 1.6;
+    g.beginPath();
+    polyPath(g, P, 0, -H);
+    g.stroke();
+    g.restore();
+    g.strokeStyle = 'rgba(15,14,12,0.55)';
+    g.lineWidth = 0.7;
+    g.beginPath();
+    polyPath(g, P, 0, -H);
+    g.stroke();
+  }
+
   /** A torn-down building: cracked slab, wall stubs and heaps of debris. */
   private drawRubble(g: CanvasRenderingContext2D, b: BuildingDef, scale: number): void {
+    if (b.poly) {
+      const fb = polyBounds(b.poly);
+      g.save();
+      g.beginPath();
+      polyPath(g, b.poly);
+      g.clip();
+      this.drawRubble(g, { ...b, poly: undefined, x: fb.x, y: fb.y, w: fb.w, h: fb.h }, scale);
+      g.restore();
+      return;
+    }
     const h = (n: number) => hash2(b.id, n, 123);
     blurred(g, 3 * scale, () => {
       g.fillStyle = 'rgba(10,9,8,0.4)';

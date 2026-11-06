@@ -56,6 +56,13 @@ export interface BuildingDef extends Rect {
   survivors: number;
   /** Extra decorative parts drawn with the building (e.g. steeple, helipad). */
   deco?: string;
+  /**
+   * Real-world footprint polygon (ground level). When present, x/y/w/h is the
+   * bounding box of footprint + roof (the roof is drawn wallH above the footprint).
+   */
+  poly?: Vec[];
+  /** pitched roof direction for real-world houses (radians), if any */
+  ridge?: number;
 }
 
 export type AreaKind =
@@ -75,7 +82,11 @@ export type AreaKind =
   | 'path'
   | 'driveway'
   | 'graveyard'
-  | 'lot';
+  | 'lot'
+  | 'forest'
+  | 'sand'
+  | 'wetland'
+  | 'tint';
 
 export interface Area extends Rect {
   kind: AreaKind;
@@ -83,6 +94,8 @@ export interface Area extends Rect {
   v: number;
   /** For parking: stall orientation, 0 = vertical stalls, 1 = horizontal stalls. */
   o?: number;
+  /** real-world outline; x/y/w/h is its bounding box */
+  poly?: Vec[];
 }
 
 export type PropKind =
@@ -151,6 +164,23 @@ export interface River {
   y0: number;
 }
 
+/** A real-world road or path as a polyline. */
+export interface Way {
+  pts: Vec[];
+  /** width of the carriageway in world units */
+  w: number;
+  kind: 'major' | 'minor' | 'service' | 'path' | 'pedestrian';
+  bridge: boolean;
+  name: string;
+}
+
+/** Real-world water: a polygon (lake, river area) or a line with a width (stream). */
+export interface WaterBody {
+  poly?: Vec[];
+  line?: Vec[];
+  w?: number;
+}
+
 export interface MapData {
   seed: number;
   townName: string;
@@ -169,4 +199,8 @@ export interface MapData {
   town: Rect;
   /** Points on the map edge where hordes can enter (end of highways etc). */
   entries: Vec[];
+  /** set for maps built from OpenStreetMap */
+  real?: { lat: number; lon: number; name: string; half: number; scale: number };
+  ways?: Way[];
+  water?: WaterBody[];
 }

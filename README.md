@@ -2,7 +2,7 @@
 
 **Hold the light. Survive the night.**
 
-Ember Haven is an original survival strategy game for Android. The town has been overrun. You command a handful of survivors from an old fire station. By day you send squads out to scout and scavenge the town, rescue the people hiding in it, and claim buildings to grow your haven. By night you fortify, light the dark and hold the line while the infected horde marches on you. Survive until the convoy arrives on **Day 13**.
+Ember Haven is an original survival strategy game for Android. Play in a pre-generated town, or in **any real place on Earth**: your own street, your home town or a city you've visited, built from OpenStreetMap data. The town has been overrun. You command a handful of survivors from an old fire station. By day you send squads out to scout and scavenge the town, rescue the people hiding in it, and claim buildings to grow your haven. By night you fortify, light the dark and hold the line while the infected horde marches on you. Survive until the convoy arrives on **Day 13**.
 
 The art direction is dark and grounded: muted natural colours, soft shadows, weathered roads and roofs, overgrown lots and a film-grain grade, with warm firelight against cold nights.
 
@@ -10,7 +10,7 @@ The game is built with TypeScript and HTML5 Canvas and packaged as a native Andr
 
 ## Install on your phone
 
-1. On your Android phone, open this repository on GitHub and download [`releases/EmberHaven-0.4.0-debug.apk`](releases/EmberHaven-0.4.0-debug.apk). Tap **Download raw file**.
+1. On your Android phone, open this repository on GitHub and download [`releases/EmberHaven-0.5.0-debug.apk`](releases/EmberHaven-0.5.0-debug.apk). Tap **Download raw file**.
 2. Open the downloaded file. If Android asks, allow your browser or file manager to **install unknown apps**.
 3. Tap **Install** and launch **Ember Haven**. The game runs in landscape.
 
@@ -22,6 +22,7 @@ Every push to the repository also builds a fresh APK through GitHub Actions. You
 
 | | |
 |---|---|
+| **Choose your town** | **New game** opens the town picker. **Millbrook** is the pre-generated town and plays offline. **A real place** downloads about 1.2 × 1.2 km of real streets, buildings, parks and water around any town, district or address you search for, or around **your location**. |
 | **Command squads** | Tap a squad card (Alpha, Bravo, Charlie) to select it. Tap the ground to move it, or tap a building for orders. Tap the selected card again to assign or send home members. |
 | **Scout and scavenge** | Scouting reveals what's inside a building: supplies, infected and survivors. Scavenging brings everything back to your stockpile. Infected hiding inside burst out when you arrive. |
 | **Grow the haven** | Claim cleared buildings next to your haven for more beds. Rescued survivors walk to the haven and stand guard. |
@@ -71,6 +72,29 @@ cd android && ./gradlew assembleRelease   # or bundleRelease for the Play Store 
 
 Then configure `signingConfigs` in `android/app/build.gradle`. Keep the keystore out of git.
 
+## Real-world maps
+
+Real towns are built from [OpenStreetMap](https://www.openstreetmap.org/) data:
+
+1. **Search** uses the Nominatim geocoder. **Use my location** asks Android for your approximate position, which is used only to choose the map area.
+2. The game downloads the map features in a box about 1.2 km across from a public Overpass API server. If one server is busy, it tries the next.
+3. The importer (`src/world/osm.ts`) turns the data into a playable town:
+   - **Buildings** keep their real outlines, heights (from `building:levels`) and roof shapes.
+   - **Building types** come from OSM tags and the shops inside them, for example supermarkets, pharmacies, police and fire stations, schools, churches, warehouses, garages and houses. The type decides the loot, the survivors and how many infected are inside.
+   - **Roads** come in widths from highways down to footpaths, and **bridges** span rivers, canals and lakes.
+   - **Land** includes parks, woods, farmland, cemeteries and parking lots.
+   - **Trees and cars** are placed around them, and the horde comes in along the roads that leave the map.
+4. Your haven starts at the nearest fire station if there is one, otherwise at a police station or another solid building near the centre.
+
+The processed town is stored on the phone (IndexedDB), so **Continue** works offline afterwards.
+
+**Limits:**
+- Very dense city centres are capped at the 2,400 largest buildings.
+- Places with almost no mapped buildings make a sparse town.
+- Open sea coastlines aren't filled in yet, but rivers and lakes are.
+
+Map data © OpenStreetMap contributors, available under the [Open Database Licence](https://www.openstreetmap.org/copyright). The attribution is shown in the picker, on the loading screen and in the HUD during play. The app identifies itself to the OSM services with its own user agent and sends nothing but the search text and map coordinates.
+
 ## Project layout
 
 ```
@@ -79,6 +103,9 @@ src/
   core/                 seeded RNG and noise, math helpers
   world/
     mapgen.ts           procedural town generator (fixed seed = pre-generated map)
+    osm.ts              OpenStreetMap search, download and real-world town importer
+    geo.ts              polygon helpers (clipping, simplification, ring assembly)
+    mapstore.ts         keeps the downloaded town on the device (IndexedDB)
     nav.ts              navigation grid, A* pathfinding, horde flow field
     types.ts            map data model (roads, building footprints, areas, props)
   game/
@@ -97,11 +124,12 @@ releases/               prebuilt APKs
 
 ## Map
 
-For now the town is generated from a fixed seed (`SEED` in `src/main.ts`), so every game uses the same pre-generated map. The generator outputs plain map data (road segments, building footprints with types, land-use areas and props), which is the same shape of data that OpenStreetMap provides. A real-world map importer can replace `generateMap()` later without touching the rest of the game.
+Millbrook is generated from a fixed seed (`SEED` in `src/main.ts`), so it's the same town every game. Real-world towns go through the importer described above. Both produce the same map data (building footprints with types, roads, water, land-use areas and props), so the simulation and renderer treat them the same way.
 
 ## Roadmap ideas
 
-- Real-world locations from OpenStreetMap data
+- Coastlines and the sea for seaside towns
+- Bigger real-world maps (several square kilometres, streamed in)
 - Survivor traits and skills that improve with experience
 - Rival survivor groups and trading
 - Seasons and more structure types (walls, traps, generators)
