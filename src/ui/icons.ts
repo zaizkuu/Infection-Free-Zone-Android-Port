@@ -1,0 +1,45 @@
+// Original line-icon set (24x24, stroke = currentColor).
+const svg = (body: string, fill = false) =>
+  `<svg viewBox="0 0 24 24" aria-hidden="true" class="ic" fill="${fill ? 'currentColor' : 'none'}" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">${body}</svg>`;
+
+export const I = {
+  food: svg('<ellipse cx="12" cy="6" rx="6" ry="2.2"/><path d="M6 6v11c0 1.2 2.7 2.2 6 2.2s6-1 6-2.2V6"/><path d="M6 11c0 1.2 2.7 2.2 6 2.2s6-1 6-2.2"/>'),
+  mat: svg('<rect x="3" y="5" width="18" height="4" rx="1"/><rect x="3" y="10" width="18" height="4" rx="1"/><rect x="3" y="15" width="18" height="4" rx="1"/><path d="M7 5v14M17 5v14"/>'),
+  ammo: svg('<path d="M8 21V10c0-3 1.8-6 4-7 2.2 1 4 4 4 7v11z"/><path d="M8 16h8"/>'),
+  med: svg('<rect x="3" y="3" width="18" height="18" rx="4"/><path d="M12 8v8M8 12h8"/>'),
+  people: svg('<circle cx="9" cy="7" r="3.2"/><path d="M3 20c0-3.6 2.7-6 6-6s6 2.4 6 6"/><path d="M16 4.5a3 3 0 0 1 0 5.6M18.5 14.5c1.6.9 2.5 2.8 2.5 5.5"/>'),
+  person: svg('<circle cx="12" cy="7" r="3.4"/><path d="M5 21c0-4 3.1-7 7-7s7 3 7 7"/>'),
+  sun: svg('<circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/>'),
+  moon: svg('<path d="M20 14.5A8 8 0 0 1 9.5 4 8 8 0 1 0 20 14.5z"/>'),
+  pause: svg('<rect x="6" y="5" width="4" height="14" rx="1"/><rect x="14" y="5" width="4" height="14" rx="1"/>', true),
+  play: svg('<path d="M7 5l12 7-12 7z"/>', true),
+  ff: svg('<path d="M3 6l9 6-9 6zM12 6l9 6-9 6z"/>', true),
+  fff: svg('<path d="M1 7l7 5-7 5zM8.5 7l7 5-7 5zM16 7l7 5-7 5z"/>', true),
+  menu: svg('<path d="M4 7h16M4 12h16M4 17h16"/>'),
+  hammer: svg('<path d="M14 6l4 4"/><path d="M10.5 3.5l6 6-2.5 2.5-6-6z"/><path d="M11 9L3.5 16.5a1.8 1.8 0 0 0 2.5 2.5L13.5 11.5"/>'),
+  haven: svg('<path d="M3 11l9-7 9 7"/><path d="M5 10v10h14V10"/><path d="M12 19c-2 0-3-1.4-3-2.8 0-1.8 1.6-2.4 2-4.2 1.6 1 4 2.6 4 4.4 0 1.4-1 2.6-3 2.6z"/>'),
+  scout: svg('<circle cx="10.5" cy="10.5" r="6"/><path d="M15 15l5.5 5.5"/>'),
+  scavenge: svg('<path d="M4 8l8-4 8 4v9l-8 4-8-4z"/><path d="M4 8l8 4 8-4M12 12v9"/>'),
+  claim: svg('<path d="M5 21V4"/><path d="M5 4h11l-2 4 2 4H5"/>'),
+  fortify: svg('<path d="M12 3l8 3v6c0 4.5-3.4 8-8 9-4.6-1-8-4.5-8-9V6z"/><path d="M8.5 12l2.5 2.5 4.5-5"/>'),
+  ret: svg('<path d="M9 14l-5-5 5-5"/><path d="M4 9h10a6 6 0 0 1 0 12h-3"/>'),
+  stop: svg('<rect x="6" y="6" width="12" height="12" rx="2"/>'),
+  close: svg('<path d="M6 6l12 12M18 6L6 18"/>'),
+  check: svg('<path d="M5 12.5l4.5 4.5L19 7.5"/>'),
+  plus: svg('<path d="M12 5v14M5 12h14"/>'),
+  minus: svg('<path d="M5 12h14"/>'),
+  skull: svg('<path d="M12 3c-4.4 0-8 3.2-8 7.4 0 2.4 1.2 4.5 3 5.8V20h10v-3.8c1.8-1.3 3-3.4 3-5.8C20 6.2 16.4 3 12 3z"/><circle cx="9" cy="11" r="1.6" fill="currentColor"/><circle cx="15" cy="11" r="1.6" fill="currentColor"/><path d="M10 20v-2M14 20v-2"/>'),
+  tower: svg('<path d="M7 21l2-11h6l2 11"/><path d="M6 10h12l-1.5-4h-9z"/><path d="M12 3v3M8 21l7-8M16 21l-7-8"/>'),
+  barrel: svg('<path d="M7 9h10l-1 12H8z"/><path d="M12 2c1.5 2 3 3 3 4.6A3 3 0 0 1 12 9.5a3 3 0 0 1-3-2.9C9 5.5 10 4.5 12 2z"/>'),
+  garden: svg('<path d="M12 21v-8"/><path d="M12 13c0-4 3-6 7-6 0 4-3 6-7 6z"/><path d="M12 15c0-3-2.4-5-6-5 0 3 2.4 5 6 5z"/><path d="M4 21h16"/>'),
+  workshop: svg('<circle cx="12" cy="12" r="3"/><path d="M12 2v3M12 19v3M4.2 4.2l2.1 2.1M17.7 17.7l2.1 2.1M2 12h3M19 12h3M4.2 19.8l2.1-2.1M17.7 6.3l2.1-2.1"/>'),
+  infirmary: svg('<path d="M3 20L12 4l9 16z"/><path d="M12 11v6M9 14h6"/>'),
+  sound: svg('<path d="M4 9h4l5-4v14l-5-4H4z"/><path d="M16.5 8.5a5 5 0 0 1 0 7M19 6a8.5 8.5 0 0 1 0 12"/>'),
+  mute: svg('<path d="M4 9h4l5-4v14l-5-4H4z"/><path d="M17 9l5 6M22 9l-5 6"/>'),
+  info: svg('<circle cx="12" cy="12" r="9"/><path d="M12 11v6M12 7.5v.5"/>'),
+  target: svg('<circle cx="12" cy="12" r="8"/><circle cx="12" cy="12" r="3"/><path d="M12 2v4M12 18v4M2 12h4M18 12h4"/>'),
+  gun: svg('<path d="M3 9h15l2-2v5h-6l-1 2h-3l-1 5H5l1-5H3z"/>'),
+  flame: svg('<path d="M12 22c-4 0-7-2.6-7-6.3C5 11 9.5 9.6 10 4c3.4 2 9 6.4 9 11.7 0 3.7-3 6.3-7 6.3z"/><path d="M12 22c-1.8 0-3-1.2-3-2.8 0-2 1.8-2.8 2.4-4.7 1.6 1.1 3.6 2.6 3.6 4.7 0 1.6-1.2 2.8-3 2.8z"/>'),
+};
+
+export type IconName = keyof typeof I;
