@@ -33,11 +33,11 @@ const TOWN_NAMES = ['Ashbury', 'Millbrook', 'Harlow Creek', 'Stonebridge', 'West
 const V_STREETS = ['Alder', 'Birch', 'Cedar', 'Dogwood', 'Elm', 'Hawthorn', 'Juniper', 'Linden', 'Poplar', 'Willow', 'Sycamore'];
 const H_STREETS = ['Railway', 'Mill', 'Church', 'Market', 'Union', 'Garden', 'Harbor', 'Ridge', 'Summit', 'Valley', 'Orchard'];
 
-const HOUSE_ROOFS = ['#9a4f3c', '#7d4436', '#5a6270', '#4c5560', '#6b4a3a', '#56676a', '#8a5a44', '#3f4a52', '#a0613f'];
-const HOUSE_WALLS = ['#d8ccb4', '#cbbfa6', '#bfc4c2', '#d6c3a5', '#c9b8a0', '#b7b9ae', '#d9d3c4', '#c2a98b'];
-const FLAT_ROOFS = ['#8e9296', '#9b9a94', '#85898c', '#a29e95', '#7f8488', '#97958c'];
-const SHOP_WALLS = ['#b88f6a', '#a77b5c', '#c4b39a', '#9d8f80', '#b9a58c', '#8f7f72', '#c7a27a'];
-const CAR_COLORS = ['#8b2f2f', '#2f4f6f', '#d8d8d0', '#2e2e30', '#6f6f6f', '#8a7a3a', '#2f5a3f', '#b0b4b8', '#5c3b5e', '#a8642c'];
+const HOUSE_ROOFS = ['#3b3d40', '#4a3f37', '#45494f', '#5a4636', '#6b4436', '#4d5148', '#5e5a52', '#3f3a35', '#6e4f3c'];
+const HOUSE_WALLS = ['#a49a88', '#9b9483', '#8d8b84', '#a8977c', '#958a7a', '#b0a690', '#8a8478', '#a39c8e'];
+const FLAT_ROOFS = ['#5d5e5c', '#676661', '#555756', '#6e6b64', '#4f5251', '#605d57'];
+const SHOP_WALLS = ['#8a6e57', '#7a6250', '#958a7a', '#776d63', '#8c7b66', '#6b625a', '#8f7559'];
+const CAR_COLORS = ['#6a2a2a', '#2a3a4c', '#a9a8a2', '#232426', '#55575a', '#6e6440', '#2d4234', '#8a8d90', '#4a3a4c', '#7a5232'];
 
 interface Cell {
   i: number;
@@ -498,7 +498,7 @@ export function generateMap(seed: number): MapData {
     const bw = Math.min(L - 30, 150);
     const bd = Math.min(D * 0.48, 92);
     const br = toWorld(R, f, (L - bw) / 2, D - bd - 8, bw, bd);
-    addBuilding('supermarket', br, f, { name: 'Greenleaf Market', sub: c.streets[f], wallH: 12, roofColor: '#a3a6a8', wallColor: '#c9b48e' });
+    addBuilding('supermarket', br, f, { name: 'Greenleaf Market', sub: c.streets[f], wallH: 12, roofColor: '#77797a', wallColor: '#9a8a6c' });
     const pk = toWorld(R, f, 8, 6, L - 16, D - bd - 24);
     parkingLot(pk, f === 'n' || f === 's' ? 0 : 1, 0.28);
     const p = toWorld(R, f, L - 14, D - bd - 14, 0, 0);
@@ -513,7 +513,7 @@ export function generateMap(seed: number): MapData {
     addArea('concrete', R);
     const bw = Math.min(L * 0.5, 100);
     const br = toWorld(R, f, 6, 4, bw, Math.min(66, D * 0.45));
-    addBuilding('police', br, f, { name: `${townName} Police Dept.`, sub: c.streets[f], wallH: 13, roofColor: '#6c747c', wallColor: '#b4ab9c' });
+    addBuilding('police', br, f, { name: `${townName} Police Dept.`, sub: c.streets[f], wallH: 13, roofColor: '#55595e', wallColor: '#8f887c' });
     const pk = toWorld(R, f, bw + 14, 4, L - bw - 20, Math.min(66, D * 0.45));
     addArea('parking', pk, rng.next(), f === 'n' || f === 's' ? 0 : 1);
     for (let t = 0; t < 3; t++) {
@@ -574,7 +574,7 @@ export function generateMap(seed: number): MapData {
     const bd = Math.min(D * 0.46, 100);
     const u = (L - bw) / 2;
     const br = toWorld(R, f, u, 34, bw, bd);
-    addBuilding('hospital', br, f, { name: `${townName} General Hospital`, sub: c.streets[f], wallH: 18, roofColor: '#c9cbc8', wallColor: '#d7d4cc', deco: 'helipad' });
+    addBuilding('hospital', br, f, { name: `${townName} General Hospital`, sub: c.streets[f], wallH: 18, roofColor: '#9c9d9a', wallColor: '#aaa79e', deco: 'helipad' });
     // drive & parking
     addArea('concrete', toWorld(R, f, u - 10, 6, bw + 20, 22));
     const pk = toWorld(R, f, 10, 34 + bd + 14, L - 20, D - bd - 56);
@@ -595,7 +595,7 @@ export function generateMap(seed: number): MapData {
     addArea('lawn', R);
     const bw = Math.min(L * 0.55, 140);
     const br = toWorld(R, f, 8, 10, bw, Math.min(56, D * 0.32));
-    addBuilding('school', br, f, { name: `${townName} Elementary`, sub: c.streets[f], wallH: 12, roofColor: '#8a8d84', wallColor: '#b5765a' });
+    addBuilding('school', br, f, { name: `${townName} Elementary`, sub: c.streets[f], wallH: 12, roofColor: '#62645e', wallColor: '#7f5040' });
     const fieldR = toWorld(R, f, 10, D * 0.42, L - 20, D * 0.54);
     addArea('track', fieldR);
     const court = toWorld(R, f, bw + 20, 10, Math.min(L - bw - 28, 56), 34);
@@ -617,8 +617,8 @@ export function generateMap(seed: number): MapData {
       sub: c.streets[f],
       wallH: 14,
       roof: vertical ? 'gable-v' : 'gable-h',
-      roofColor: '#4d5660',
-      wallColor: '#c9c2b2',
+      roofColor: '#3c4249',
+      wallColor: '#9c968a',
       deco: 'steeple',
     });
     const g = toWorld(R, f, 18 + (vertical ? cw : ch) + 20, 14, L - (vertical ? cw : ch) - 48, D - 34);
@@ -653,7 +653,7 @@ export function generateMap(seed: number): MapData {
     const w = vertical ? Math.min(a.w - 16, 82) : 62;
     const h = vertical ? 62 : Math.min(a.h - 16, 82);
     const fr = toWorld(a, f, 8, 22, vertical ? w : h, vertical ? h : w);
-    addBuilding('firestation', fr, f, { name: 'Fire Station No. 3', sub: c.streets[f], wallH: 12, roofColor: '#7e6f66', wallColor: '#9e4a3c' });
+    addBuilding('firestation', fr, f, { name: 'Fire Station No. 3', sub: c.streets[f], wallH: 12, roofColor: '#5c534d', wallColor: '#7a3a2f' });
     const t = toWorld(a, f, 8 + (vertical ? w : h) * 0.5, 10, 0, 0);
     addProp('firetruck', t.x, t.y, 1, vertical ? 0.04 : Math.PI / 2 + 0.04, '#b8322a', { solid: true });
     const sub = { ...c, r: b };
@@ -671,7 +671,7 @@ export function generateMap(seed: number): MapData {
     const can = toWorld(a, f, (L - cw) / 2, 14, cw, 40);
     addProp('canopy', can.x + can.w / 2, can.y + can.h / 2, 1, 0, '#d8d4c8', { w: can.w, h: can.h });
     const st = toWorld(a, f, (L - 54) / 2, 72, 54, 34);
-    addBuilding('gas', st, f, { name: 'Quik-Fill Station', sub: c.streets[f], wallH: 9, roofColor: '#9fa3a0', wallColor: '#c6c1b4' });
+    addBuilding('gas', st, f, { name: 'Quik-Fill Station', sub: c.streets[f], wallH: 9, roofColor: '#767977', wallColor: '#9a968b' });
     const p = toWorld(a, f, (L - cw) / 2 + 10, 34, 0, 0);
     addProp('car', p.x, p.y, 1, vertical ? Math.PI / 2 : 0, rng.pick(CAR_COLORS), { solid: true });
     fillResidential({ ...c }, b);
@@ -684,7 +684,7 @@ export function generateMap(seed: number): MapData {
     const D = depthLen(R, f);
     if (factory) {
       const br = toWorld(R, f, 16, 30, L - 32, Math.min(D * 0.52, 220));
-      addBuilding('factory', br, f, { name: 'Calder Steelworks', sub: c.streets[f], wallH: 18, roofColor: '#6f7477', wallColor: '#8c7a6a' });
+      addBuilding('factory', br, f, { name: 'Calder Steelworks', sub: c.streets[f], wallH: 18, roofColor: '#575b5e', wallColor: '#6e6052' });
       const yard = toWorld(R, f, 10, Math.min(D * 0.52, 220) + 44, L - 20, D - Math.min(D * 0.52, 220) - 56);
       for (let t = 0; t < 10; t++) {
         const x = yard.x + rng.range(12, yard.w - 12);
@@ -698,7 +698,7 @@ export function generateMap(seed: number): MapData {
         const bw = seg - rng.range(16, 30);
         const bd = Math.min(D - 70, rng.range(90, 140));
         const br = toWorld(R, f, t * seg + (seg - bw) / 2, 24, bw, bd);
-        addBuilding('warehouse', br, f, { sub: c.streets[f], wallH: rng.int(12, 15), roofColor: rng.pick(['#7a8084', '#8b8f8a', '#6d7578', '#9a8f7c']) });
+        addBuilding('warehouse', br, f, { sub: c.streets[f], wallH: rng.int(12, 15), roofColor: rng.pick(['#5d6266', '#6b6e6a', '#545b5e', '#736b5d']) });
         const tk = toWorld(R, f, t * seg + seg / 2 + rng.range(-20, 20), 12, 0, 0);
         if (rng.chance(0.6)) addProp('truck', tk.x, tk.y, 1, f === 'n' || f === 's' ? 0 : Math.PI / 2, rng.pick(['#d8d8d0', '#8b2f2f', '#2f4f6f']), { solid: true });
       }
@@ -858,7 +858,7 @@ export function generateMap(seed: number): MapData {
       const fy = f.y - 70 > 20 ? f.y - 66 : f.y + f.h + 10;
       addArea('dirt', { x: fx - 10, y: fy - 6, w: 110, h: 62 });
       addBuilding('farmhouse', { x: fx, y: fy, w: 40, h: 30 }, 's', { sub: 'County Road', wallH: 9 });
-      addBuilding('barn', { x: fx + 52, y: fy - 2, w: 44, h: 46 }, 's', { sub: 'County Road', roofColor: '#7c3328', wallColor: '#8f3a2c', roof: 'gable-v', wallH: 12 });
+      addBuilding('barn', { x: fx + 52, y: fy - 2, w: 44, h: 46 }, 's', { sub: 'County Road', roofColor: '#5e2a22', wallColor: '#6e2e24', roof: 'gable-v', wallH: 12 });
       for (let t = 0; t < 4; t++) addProp('hay', f.x + rng.range(10, f.w - 10), f.y + rng.range(10, f.h - 10), 5);
     }
   });

@@ -65,6 +65,7 @@ export class Ui {
   private lastRes = { food: 0, mat: 0, ammo: 0, med: 0 };
   private squadKeys: string[] = [];
   private placeKey = '';
+  private pressing = false;
   private screen: '' | 'title' | 'howto' | 'pause' | 'end' = '';
 
   constructor(
@@ -116,6 +117,10 @@ export class Ui {
 
     this.hud.addEventListener('click', (e) => this.onClick(e));
     this.screens.addEventListener('click', (e) => this.onScreenClick(e));
+    this.el.card.addEventListener('pointerdown', () => (this.pressing = true));
+    const release = () => setTimeout(() => (this.pressing = false), 0);
+    addEventListener('pointerup', release);
+    addEventListener('pointercancel', release);
   }
 
   // ------------------------------------------------------------------ events
@@ -280,11 +285,32 @@ export class Ui {
     } else if (this.panel === 'guards') {
       [html, key] = this.guardsSheet(st);
     }
-    if (key !== this.panelKey) {
+    // Never swap the panel's buttons while a finger is on it, or the tap would be lost.
+    if (key !== this.panelKey && !this.pressing) {
       this.el.card.innerHTML = html;
       this.panelKey = key;
     }
+    this.patchDynamic(st);
     this.el.card.classList.remove('hidden');
+  }
+
+  /** Fast-changing numbers (health) are patched in place instead of re-rendering the panel. */
+  private patchDynamic(st: GameState): void {
+    this.el.card.querySelectorAll<HTMLElement>('[data-hp]').forEach((el) => {
+      const s = st.survivors.find((x) => x.id === Number(el.dataset.hp));
+      (el.firstElementChild as HTMLElement).style.width = s ? `${Math.max(0, (s.hp / s.maxHp) * 100)}%` : '0%';
+    });
+    const bar = this.el.card.querySelector<HTMLElement>('[data-bhp]');
+    if (bar) {
+      const id = Number(bar.dataset.bhp);
+      const max = maxHpOf(this.app.map, st.b, id);
+      const f = Math.max(0, st.b[id].hp / max);
+      const i = bar.firstElementChild as HTMLElement;
+      i.style.width = `${f * 100}%`;
+      i.style.background = f > 0.5 ? 'var(--good)' : f > 0.25 ? 'var(--warn)' : 'var(--bad)';
+      const txt = this.el.card.querySelector<HTMLElement>('[data-bhptext]');
+      if (txt) txt.textContent = `${Math.max(0, Math.round(st.b[id].hp))} / ${max}`;
+    }
   }
 
   private head(title: string, sub: string): string {
@@ -314,10 +340,8 @@ export class Ui {
     };
     const lootLeft = b.loot.food + b.loot.mat + b.loot.ammo + b.loot.med + b.loot.guns;
     if (b.owned) {
-      const max = maxHpOf(this.app.map, st.b, id);
-      const f = b.hp / max;
-      body += `<div class="hpbar"><i style="width:${Math.max(0, f * 100)}%;background:${f > 0.5 ? 'var(--good)' : f > 0.25 ? 'var(--warn)' : 'var(--bad)'}"></i></div>`;
-      body += `<div class="kv"><span>Structure</span><b>${Math.max(0, Math.round(b.hp))} / ${max}</b></div>`;
+      body += `<div class="hpbar" data-bhp="${id}"><i></i></div>`;
+      body += `<div class="kv"><span>Structure</span><b data-bhptext></b></div>`;
       body += `<div class="kv"><span>Barricades</span><b>${['None', 'Planks', 'Sandbags', 'Steel'][b.fort]}</b></div>`;
       body += `<div class="kv"><span>Beds</span><b>${d.capacity}</b></div>`;
     } else if (b.explored) {
@@ -379,7 +403,7 @@ export class Ui {
     const rows = members
       .map(
         (m) =>
-          `<div class="member"><b>${esc(m.name)}</b><span>${I.gun}${GUNS[m.gun].name}</span><div class="hpbar"><i style="width:${(m.hp / m.maxHp) * 100}%"></i></div></div>`,
+          `<div class="member"><b>${esc(m.name)}</b><span>${I.gun}${GUNS[m.gun].name}</span><div class="hpbar" data-hp="${m.id}"><i></i></div></div>`,
       )
       .join('');
     const busy = members.some((m) => m.inside >= 0);
@@ -396,7 +420,7 @@ export class Ui {
     const rows = guards
       .map(
         (m) =>
-          `<div class="member"><b>${esc(m.name)}${m.joining ? ' <small style="color:var(--info)">· arriving</small>' : ''}</b><span>${I.gun}${GUNS[m.gun].name}</span><div class="hpbar"><i style="width:${(m.hp / m.maxHp) * 100}%"></i></div></div>`,
+          `<div class="member"><b>${esc(m.name)}${m.joining ? ' <small style="color:var(--info)">· arriving</small>' : ''}</b><span>${I.gun}${GUNS[m.gun].name}</span><div class="hpbar" data-hp="${m.id}"><i></i></div></div>`,
       )
       .join('');
     const html = `${this.head('Haven Guards', `${guards.length} survivors defend the haven and heal there`)}${rows || '<div class="note">No one is guarding the haven.</div>'}<div class="note">Assign guards to a squad from its card. Guards shoot anything that comes close.</div>`;
@@ -564,7 +588,7 @@ export class Ui {
         <button class="btn" data-act="howto">${I.info}How to play</button>
         <button class="btn" data-act="sound">${this.app.soundOn ? I.sound : I.mute}Sound <small>${this.app.soundOn ? 'On' : 'Off'}</small></button>
       </div>
-      <div class="foot">v0.1 prototype · pre-generated town map</div>
+      <div class="foot">v0.2 prototype · pre-generated town map</div>
     </div></div>`;
   }
 

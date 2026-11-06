@@ -19,8 +19,10 @@ export interface ViewState {
 
 /** Units are drawn slightly larger than their collision size so they read well on phones. */
 const UNIT_SCALE = 1.25;
-const SKIN = ['#e0b48f', '#c99470', '#a8734f', '#7a4f33', '#f0c8a6', '#8c5a3c'];
-const ZCLOTH = ['#55604a', '#6a5a4a', '#4c5a60', '#5e4f5a', '#646b55', '#3f4a3c'];
+const SKIN = ['#c49a7a', '#a57a5a', '#8a5e42', '#5e3e2a', '#d2ae90', '#74503a'];
+const ZCLOTH = ['#3a3d33', '#463b33', '#33393d', '#3f3540', '#444736', '#2c312a'];
+/** Muted, practical clothing; squads are told apart by the ring at their feet and backpack colour. */
+const CLOTH = ['#3b4636', '#4a4136', '#2f3945', '#55504a', '#3d3a40', '#5a4a3a', '#44483c'];
 
 export class WorldRenderer {
   readonly mapR: MapRenderer;
@@ -45,10 +47,10 @@ export class WorldRenderer {
     const img = this.fogCtx.createImageData(rt.fogW, rt.fogH);
     for (let i = 0; i < rt.explored.length; i++) {
       const o = i * 4;
-      img.data[o] = 9;
-      img.data[o + 1] = 12;
-      img.data[o + 2] = 18;
-      img.data[o + 3] = rt.explored[i] ? 0 : 228;
+      img.data[o] = 5;
+      img.data[o + 1] = 7;
+      img.data[o + 2] = 10;
+      img.data[o + 3] = rt.explored[i] ? 0 : 236;
     }
     this.fogCtx.putImageData(img, 0, 0);
     rt.fogDirty = false;
@@ -76,12 +78,12 @@ export class WorldRenderer {
     for (const d of rt.decals) {
       if (!inView(d.x, d.y)) continue;
       const a = Math.max(0, 1 - d.t / 90);
-      ctx.fillStyle = `rgba(70,12,12,${0.55 * a})`;
+      ctx.fillStyle = `rgba(42,7,7,${0.65 * a})`;
       ctx.beginPath();
       ctx.ellipse(d.x, d.y, d.r * 1.3, d.r * 0.9, d.a, 0, Math.PI * 2);
       ctx.fill();
       if (d.corpse) {
-        ctx.fillStyle = `rgba(55,62,45,${0.9 * a})`;
+        ctx.fillStyle = `rgba(38,42,32,${0.95 * a})`;
         ctx.beginPath();
         ctx.ellipse(d.x, d.y, d.r * 0.75, d.r * 0.45, d.a, 0, Math.PI * 2);
         ctx.fill();
@@ -294,7 +296,7 @@ export class WorldRenderer {
         const r = 220 + hash2(i, 3, 5) * 200;
         if (!inView(cx, cy, r)) continue;
         const g = ctx.createRadialGradient(cx, cy, 0, cx, cy, r);
-        g.addColorStop(0, 'rgba(15,25,35,0.13)');
+        g.addColorStop(0, 'rgba(10,14,18,0.16)');
         g.addColorStop(1, 'rgba(15,25,35,0)');
         ctx.fillStyle = g;
         ctx.beginPath();
@@ -306,6 +308,11 @@ export class WorldRenderer {
 
     // ---- colour grading & night lighting ----
     ctx.setTransform(1, 0, 0, 1, 0, 0);
+    // overcast, slightly cool daylight
+    ctx.globalCompositeOperation = 'multiply';
+    ctx.fillStyle = 'rgb(224,226,228)';
+    ctx.fillRect(0, 0, W, H);
+    ctx.globalCompositeOperation = 'source-over';
     const h = hourOf(st.time);
     const warm = h > 16 && h < 21 ? Math.sin(((h - 16) / 5) * Math.PI) : h > 4 && h < 8 ? Math.sin(((h - 4) / 4) * Math.PI) * 0.7 : 0;
     if (warm > 0.01) {
@@ -334,10 +341,22 @@ export class WorldRenderer {
       vc.fillStyle = vg;
       vc.fillRect(0, 0, W, H);
     }
-    ctx.globalAlpha = 0.28 + night * 0.25;
+    ctx.globalAlpha = 0.34 + night * 0.22;
     ctx.drawImage(this.vignette, 0, 0);
+    // film grain
+    if (!this.grain) this.grain = ctx.createPattern(this.mapR.tex.film, 'repeat');
+    if (this.grain) {
+      this.grain.setTransform(new DOMMatrix().translate(Math.floor(Math.random() * 160), Math.floor(Math.random() * 160)));
+      ctx.globalCompositeOperation = 'overlay';
+      ctx.globalAlpha = 0.07;
+      ctx.fillStyle = this.grain;
+      ctx.fillRect(0, 0, W, H);
+      ctx.globalCompositeOperation = 'source-over';
+    }
     ctx.globalAlpha = 1;
   }
+
+  private grain: CanvasPattern | null = null;
 
   private vignette: HTMLCanvasElement | null = null;
 
@@ -357,7 +376,7 @@ export class WorldRenderer {
     g.setTransform(1, 0, 0, 1, 0, 0);
     g.globalCompositeOperation = 'source-over';
     g.clearRect(0, 0, lw, lh);
-    g.fillStyle = `rgba(6,10,26,${0.86 * night})`;
+    g.fillStyle = `rgba(3,6,14,${0.85 * night})`;
     g.fillRect(0, 0, lw, lh);
     g.globalCompositeOperation = 'destination-out';
     g.setTransform(ls, 0, 0, ls, -L * ls, -T * ls);
@@ -421,7 +440,7 @@ export class WorldRenderer {
     for (const [x, y, r, a] of warmGlows) {
       if (x + r < L || x - r > vx1 || y + r < T || y - r > vy1) continue;
       const gr = ctx.createRadialGradient(x, y, 0, x, y, r);
-      gr.addColorStop(0, `rgba(255,150,60,${a * night})`);
+      gr.addColorStop(0, `rgba(255,150,60,${a * 1.25 * night})`);
       gr.addColorStop(1, 'rgba(255,120,40,0)');
       ctx.fillStyle = gr;
       ctx.beginPath();
@@ -570,15 +589,22 @@ function personBadge(ctx: CanvasRenderingContext2D, x: number, y: number, zoom: 
 function drawSurvivor(ctx: CanvasRenderingContext2D, s: Survivor, now: number): void {
   const col = s.squad >= 0 ? SQUAD_COLORS[s.squad] : s.joining ? '#cfd8dc' : GUARD_COLOR;
   const skin = SKIN[s.id % SKIN.length];
+  const cloth = CLOTH[s.id % CLOTH.length];
   const moving = !!(s.path && s.path.length);
   const step = moving ? Math.sin(s.anim * 2) : 0;
   ctx.save();
   ctx.translate(s.x, s.y);
   ctx.scale(UNIT_SCALE, UNIT_SCALE);
-  ctx.fillStyle = 'rgba(0,0,0,0.32)';
+  ctx.fillStyle = 'rgba(0,0,0,0.42)';
   ctx.beginPath();
-  ctx.ellipse(1.3, 1.8, 4.6, 3.4, 0, 0, Math.PI * 2);
+  ctx.ellipse(1.5, 2, 4.8, 3.6, 0, 0, Math.PI * 2);
   ctx.fill();
+  // squad ring at the feet
+  ctx.strokeStyle = hexA(col, 0.7);
+  ctx.lineWidth = 0.8;
+  ctx.beginPath();
+  ctx.ellipse(0, 0.6, 5.4, 4.4, 0, 0, Math.PI * 2);
+  ctx.stroke();
   ctx.rotate(s.facing);
   // legs
   ctx.fillStyle = '#2b2f36';
@@ -603,13 +629,26 @@ function drawSurvivor(ctx: CanvasRenderingContext2D, s: Survivor, now: number): 
     ctx.stroke();
   }
   // torso
-  ctx.fillStyle = shade(col, -0.45);
+  ctx.fillStyle = shade(cloth, -0.45);
   ctx.beginPath();
   ctx.ellipse(0, 0, 3.2, 4.6, 0, 0, Math.PI * 2);
   ctx.fill();
-  ctx.fillStyle = col;
+  ctx.fillStyle = cloth;
   ctx.beginPath();
   ctx.ellipse(-0.2, -0.2, 2.6, 4, 0, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.fillStyle = shade(cloth, 0.12);
+  ctx.beginPath();
+  ctx.ellipse(-0.4, -1.4, 1.6, 2.2, 0, 0, Math.PI * 2);
+  ctx.fill();
+  // backpack in squad colour
+  ctx.fillStyle = shade(col, -0.35);
+  ctx.beginPath();
+  ctx.ellipse(-2.4, 0, 1.5, 2.5, 0, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.fillStyle = shade(col, -0.1);
+  ctx.beginPath();
+  ctx.ellipse(-2.5, -0.4, 1, 1.7, 0, 0, Math.PI * 2);
   ctx.fill();
   // head
   ctx.fillStyle = skin;
@@ -627,16 +666,16 @@ function drawSurvivor(ctx: CanvasRenderingContext2D, s: Survivor, now: number): 
 function drawZombie(ctx: CanvasRenderingContext2D, z: Zombie, now: number): void {
   const K = ZKINDS[z.kind];
   const r = K.r;
-  const cloth = z.kind === 1 ? '#6e3f38' : z.kind === 2 ? '#3d4234' : ZCLOTH[z.id % ZCLOTH.length];
-  const skin = z.kind === 1 ? '#a28a78' : '#8c9a78';
+  const cloth = z.kind === 1 ? '#4f2d28' : z.kind === 2 ? '#2e3128' : ZCLOTH[z.id % ZCLOTH.length];
+  const skin = z.kind === 1 ? '#9a8676' : z.kind === 2 ? '#7d8270' : '#8e917e';
   const sway = Math.sin(z.anim * 1.3 + z.id) * 0.22;
   const step = Math.sin(z.anim * 2);
   ctx.save();
   ctx.translate(z.x, z.y);
   ctx.scale(UNIT_SCALE, UNIT_SCALE);
-  ctx.fillStyle = 'rgba(0,0,0,0.32)';
+  ctx.fillStyle = 'rgba(0,0,0,0.42)';
   ctx.beginPath();
-  ctx.ellipse(1.3, 1.8, r, r * 0.75, 0, 0, Math.PI * 2);
+  ctx.ellipse(1.5, 2, r, r * 0.75, 0, 0, Math.PI * 2);
   ctx.fill();
   ctx.rotate(z.facing + sway);
   const k = r / 4.6;
@@ -667,10 +706,11 @@ function drawZombie(ctx: CanvasRenderingContext2D, z: Zombie, now: number): void
   ctx.beginPath();
   ctx.ellipse(-0.2, -0.2, 2.5, 3.9, 0, 0, Math.PI * 2);
   ctx.fill();
-  // blood stain
-  ctx.fillStyle = 'rgba(110,20,20,0.7)';
+  // blood stains
+  ctx.fillStyle = 'rgba(70,10,10,0.8)';
   ctx.beginPath();
-  ctx.arc(0.6, 1.2, 1.1, 0, Math.PI * 2);
+  ctx.arc(0.6, 1.2, 1.3, 0, Math.PI * 2);
+  ctx.arc(-1, -1.6, 0.8, 0, Math.PI * 2);
   ctx.fill();
   // head
   ctx.fillStyle = skin;

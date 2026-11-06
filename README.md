@@ -4,11 +4,13 @@
 
 Ember Haven is an original survival strategy game for Android. The town has been overrun. You command a handful of survivors from an old fire station. By day you send squads out to scout and scavenge the town, rescue the people hiding in it, and claim buildings to grow your haven. By night you fortify, light the dark and hold the line while the infected horde marches on you. Survive until the convoy arrives on **Day 13**.
 
+The art direction is dark and grounded: muted natural colours, soft shadows, weathered roads and roofs, overgrown lots and a film-grain grade, with warm firelight against cold nights.
+
 The game is built with TypeScript and HTML5 Canvas and packaged as a native Android app with [Capacitor](https://capacitorjs.com/). All art, icons and sound are generated in code, so there are no third-party assets.
 
 ## Install on your phone
 
-1. On your Android phone, open this repository on GitHub and download [`releases/EmberHaven-0.1.0-debug.apk`](releases/EmberHaven-0.1.0-debug.apk). Tap **Download raw file**.
+1. On your Android phone, open this repository on GitHub and download [`releases/EmberHaven-0.2.0-debug.apk`](releases/EmberHaven-0.2.0-debug.apk). Tap **Download raw file**.
 2. Open the downloaded file. If Android asks, allow your browser or file manager to **install unknown apps**.
 3. Tap **Install** and launch **Ember Haven**. The game runs in landscape.
 
