@@ -1,6 +1,6 @@
 import type { MapData } from './types';
 import type { Rect, Vec } from '../core/math';
-import { inRiver } from './mapgen';
+import { inRiver, vehicleSpots } from './mapgen';
 
 export const CELL = 10;
 
@@ -105,8 +105,10 @@ export class NavGrid {
         if (!onBridge) this.blocked[y * this.w + x] = 1;
       }
     for (const a of map.areas) if (a.kind === 'pond') markRect({ x: a.x + 4, y: a.y + 4, w: a.w - 8, h: a.h - 8 }, 0, false);
-    for (const p of map.props) {
-      if (!p.solid) continue;
+    const vehicles = new Set(vehicleSpots(map));
+    for (let pi = 0; pi < map.props.length; pi++) {
+      const p = map.props[pi];
+      if (!p.solid || vehicles.has(pi)) continue;
       if (p.kind === 'fountain') {
         markRect({ x: p.x - p.r + 3, y: p.y - p.r + 3, w: p.r * 2 - 6, h: p.r * 2 - 6 }, 0, false);
         continue;

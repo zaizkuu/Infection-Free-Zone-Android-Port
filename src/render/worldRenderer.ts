@@ -1,15 +1,25 @@
 import type { Camera } from './camera';
-import { MapRenderer } from './mapRenderer';
+import { MapRenderer, drawVehicle } from './mapRenderer';
 import { makeCanvas } from './textures';
 import { hexA, shade, type Vec } from '../core/math';
 import { hash2 } from '../core/rng';
 import type { MapData } from '../world/types';
-import { BUILD_RANGE, FOG_CELL, GUARD_COLOR, SQUAD_COLORS, STRUCTS, ZKINDS, hourOf, maxHpOf, nightness, type GameState, type StructKind, type Survivor, type Zombie } from '../game/state';
+import { BUILD_RANGE, FOG_CELL, GUARD_COLOR, SQUAD_COLORS, STRUCTS, VEHICLES, VEH_SEAT, WEATHER, ZKINDS, hourOf, maxHpOf, nightness, type GameState, type StructKind, type Survivor, type Vehicle, type Zombie } from '../game/state';
+import type { Prop } from '../world/types';
 import type { Runtime } from '../game/sim';
+
+export interface RenderOpts {
+  fog: boolean;
+  budget?: number;
+  quality?: 'high' | 'balanced' | 'low';
+  /** -2..2 */
+  brightness?: number;
+}
 
 export interface ViewState {
   selectedSquad: number;
   selectedBuilding: number;
+  selectedVehicle: number;
   placing: StructKind | null;
   ghost: Vec | null;
   ghostOk: boolean;
@@ -56,7 +66,16 @@ export class WorldRenderer {
     rt.fogDirty = false;
   }
 
-  render(ctx: CanvasRenderingContext2D, cam: Camera, st: GameState, rt: Runtime, view: ViewState, opts: { fog: boolean; budget?: number } = { fog: true }): void {
+  render(ctx: CanvasRenderingContext2D, cam: Camera, st: GameState, rt: Runtime, view: ViewState, opts: RenderOpts = { fog: true }): void {
+    const quality = opts.quality ?? 'high';
+    const bright = opts.brightness ?? 0;
+    // ease weather visuals in and out
+    const wdt = Math.min(0.1, Math.max(0, view.time - this.lastT));
+    this.lastT = view.time;
+    const w = st.weather ?? 'clear';
+    this.rainK += ((w === 'rain' ? 1 : 0) - this.rainK) * Math.min(1, wdt * 0.6);
+    this.fogK += ((w === 'fog' ? 1 : 0) - this.fogK) * Math.min(1, wdt * 0.5);
+    this.darkK += (WEATHER[w].dark - this.darkK) * Math.min(1, wdt * 0.5);
     const W = ctx.canvas.width;
     const H = ctx.canvas.height;
     const s = cam.scale;
@@ -187,6 +206,11 @@ export class WorldRenderer {
       drawStructure(ctx, sobj.kind, sobj.x, sobj.y, now + sobj.id, night, 1);
       if (sobj.hp < STRUCTS[sobj.kind].hp) bar(ctx, sobj.x, sobj.y - STRUCTS[sobj.kind].r - 12, 18, 2.2, sobj.hp / STRUCTS[sobj.kind].hp, '#7ccf6a');
     }
+    // vehicles
+    for (const v of st.vehicles ?? []) {
+      if (!inView(v.x, v.y)) continue;
+      this.drawVehicleEntity(ctx, v, view.selectedVehicle === v.id, st, now, cam.zoom);
+    }
     // fires on wrecks
     for (const f of st.fires) if (inView(f.x, f.y)) drawFire(ctx, f.x, f.y - 1, now + f.x, 1.2);
 
@@ -288,7 +312,7 @@ export class WorldRenderer {
     }
 
     // ---- clouds (day) ----
-    if (night < 0.9) {
+    if (night < 0.9 && quality !== 'low') {
       ctx.globalAlpha = 1 - night;
       for (let i = 0; i < 5; i++) {
         const cx = ((hash2(i, 1, 5) * this.map.width + now * (6 + i)) % (this.map.width + 800)) - 400;
@@ -310,7 +334,8 @@ export class WorldRenderer {
     ctx.setTransform(1, 0, 0, 1, 0, 0);
     // overcast, slightly cool daylight
     ctx.globalCompositeOperation = 'multiply';
-    ctx.fillStyle = 'rgb(224,226,228)';
+    const base = Math.max(180, Math.min(252, 224 + bright * 11 - this.darkK * 110));
+    ctx.fillStyle = `rgb(${Math.round(base)},${Math.round(base + 2)},${Math.round(base + 4 + this.rainK * 6)})`;
     ctx.fillRect(0, 0, W, H);
     ctx.globalCompositeOperation = 'source-over';
     const h = hourOf(st.time);
@@ -321,7 +346,9 @@ export class WorldRenderer {
       ctx.fillRect(0, 0, W, H);
       ctx.globalCompositeOperation = 'source-over';
     }
-    if (night > 0.01) this.drawLighting(ctx, cam, st, rt, night, now);
+    if (night > 0.01) this.drawLighting(ctx, cam, st, rt, night, now, Math.max(0.6, 0.85 - bright * 0.05), quality === 'low' ? 4 : 2);
+    if (this.fogK > 0.01) this.drawFogWeather(ctx, cam, now, this.fogK, night);
+    if (this.rainK > 0.01) this.drawRain(ctx, now, this.rainK, quality);
 
     // ---- fog of war ----
     if (opts.fog) {
@@ -341,11 +368,11 @@ export class WorldRenderer {
       vc.fillStyle = vg;
       vc.fillRect(0, 0, W, H);
     }
-    ctx.globalAlpha = 0.34 + night * 0.22;
+    ctx.globalAlpha = Math.max(0.15, 0.34 - bright * 0.03 + night * 0.22);
     ctx.drawImage(this.vignette, 0, 0);
     // film grain
     if (!this.grain) this.grain = ctx.createPattern(this.mapR.tex.film, 'repeat');
-    if (this.grain) {
+    if (this.grain && quality !== 'low') {
       this.grain.setTransform(new DOMMatrix().translate(Math.floor(Math.random() * 160), Math.floor(Math.random() * 160)));
       ctx.globalCompositeOperation = 'overlay';
       ctx.globalAlpha = 0.07;
@@ -357,26 +384,142 @@ export class WorldRenderer {
   }
 
   private grain: CanvasPattern | null = null;
+  private lastT = 0;
+  private rainK = 0;
+  private fogK = 0;
+  private darkK = 0;
+
+  private drawVehicleEntity(ctx: CanvasRenderingContext2D, v: Vehicle, selected: boolean, st: GameState, now: number, zoom: number): void {
+    const K = VEHICLES[v.kind];
+    const p: Prop = v.wreck
+      ? { kind: 'car', x: v.x, y: v.y, r: 1, a: v.a, c: '#2a2522', v: 1 }
+      : { kind: K.prop, x: v.x, y: v.y, r: 1, a: v.a, c: v.color, v: 0 };
+    // soft shadow
+    ctx.save();
+    ctx.translate(v.x + 2.2, v.y + 1.8);
+    ctx.rotate(v.a);
+    ctx.fillStyle = 'rgba(0,0,0,0.42)';
+    const L = K.prop === 'truck' ? 31 : 19;
+    const Wd = K.prop === 'truck' ? 12 : 10;
+    ctx.fillRect(-L / 2, -Wd / 2, L, Wd);
+    ctx.restore();
+    drawVehicle(ctx, p, 2);
+    if (v.broken && !v.wreck) {
+      // dust & flat tyres: a dull film over the body
+      ctx.save();
+      ctx.translate(v.x, v.y);
+      ctx.rotate(v.a);
+      ctx.fillStyle = 'rgba(80,70,55,0.35)';
+      ctx.fillRect(-L / 2 + 1, -Wd / 2 + 1, L - 2, Wd - 2);
+      ctx.restore();
+    }
+    const riding = st.survivors.some((s) => s.inside === VEH_SEAT + v.id);
+    if (v.squad >= 0 && !v.wreck) {
+      const col = SQUAD_COLORS[v.squad];
+      ctx.strokeStyle = hexA(col, riding ? 0.95 : 0.6);
+      ctx.lineWidth = 1.1 / Math.min(1, zoom);
+      ctx.beginPath();
+      ctx.ellipse(v.x, v.y, L * 0.7, L * 0.5, v.a, 0, Math.PI * 2);
+      ctx.stroke();
+      if (riding && v.path && v.path.length) {
+        // exhaust puffs
+        const bx = v.x - Math.cos(v.a) * (L / 2 + 2);
+        const by = v.y - Math.sin(v.a) * (L / 2 + 2);
+        for (let i = 0; i < 3; i++) {
+          const f = (now * 2 + i / 3) % 1;
+          ctx.fillStyle = `rgba(170,170,165,${0.25 * (1 - f)})`;
+          ctx.beginPath();
+          ctx.arc(bx - Math.cos(v.a) * f * 8, by - Math.sin(v.a) * f * 8, 1.5 + f * 3, 0, Math.PI * 2);
+          ctx.fill();
+        }
+      }
+    }
+    if (selected) {
+      ctx.strokeStyle = '#fff4e6';
+      ctx.lineWidth = 1.6 / Math.min(1.2, zoom);
+      ctx.setLineDash([4 / Math.min(1, zoom), 3 / Math.min(1, zoom)]);
+      ctx.beginPath();
+      ctx.arc(v.x, v.y, L * 0.75 + Math.sin(now * 5) * 1.2, 0, Math.PI * 2);
+      ctx.stroke();
+      ctx.setLineDash([]);
+    }
+    if (!v.wreck && v.hp < K.hp) bar(ctx, v.x, v.y - 13, 16, 2, v.hp / K.hp, '#f0b44a');
+  }
+
+  /** Low drifting fog banks plus a general haze. */
+  private drawFogWeather(ctx: CanvasRenderingContext2D, cam: Camera, now: number, k: number, night: number): void {
+    const W = ctx.canvas.width;
+    const H = ctx.canvas.height;
+    const s = cam.scale;
+    ctx.setTransform(s, 0, 0, s, -cam.left * s, -cam.top * s);
+    const col = night > 0.5 ? '70,78,92' : '176,182,186';
+    for (let i = 0; i < 14; i++) {
+      const cx = ((hash2(i, 11, 3) * this.map.width + now * (4 + i * 0.6)) % (this.map.width + 600)) - 300;
+      const cy = hash2(i, 12, 3) * this.map.height;
+      const r = 180 + hash2(i, 13, 3) * 220;
+      if (cx + r < cam.left || cx - r > cam.left + W / s || cy + r < cam.top || cy - r > cam.top + H / s) continue;
+      const g = ctx.createRadialGradient(cx, cy, 0, cx, cy, r);
+      g.addColorStop(0, `rgba(${col},${0.3 * k})`);
+      g.addColorStop(1, `rgba(${col},0)`);
+      ctx.fillStyle = g;
+      ctx.beginPath();
+      ctx.ellipse(cx, cy, r, r * 0.6, 0.2, 0, Math.PI * 2);
+      ctx.fill();
+    }
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    ctx.fillStyle = `rgba(${col},${0.14 * k})`;
+    ctx.fillRect(0, 0, W, H);
+  }
+
+  /** Screen-space rain streaks. */
+  private drawRain(ctx: CanvasRenderingContext2D, now: number, k: number, quality: string): void {
+    const W = ctx.canvas.width;
+    const H = ctx.canvas.height;
+    const n = Math.min(quality === 'low' ? 90 : 240, Math.floor(((W * H) / 7000) * k));
+    const len = H * 0.035;
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    ctx.strokeStyle = `rgba(185,198,210,${0.32 * k})`;
+    ctx.lineWidth = Math.max(1, W / 1400);
+    ctx.beginPath();
+    for (let i = 0; i < n; i++) {
+      const sp = 0.8 + hash2(i, 1, 9) * 0.6;
+      const x = (hash2(i, 2, 9) * W + now * W * 0.18 * sp) % W;
+      const y = (hash2(i, 3, 9) * H + now * H * 1.6 * sp) % H;
+      ctx.moveTo(x, y);
+      ctx.lineTo(x - len * 0.25, y - len);
+    }
+    ctx.stroke();
+    // splashes
+    ctx.fillStyle = `rgba(190,200,210,${0.22 * k})`;
+    for (let i = 0; i < n / 4; i++) {
+      const t = (now * 3 + hash2(i, 4, 9)) % 1;
+      const x = hash2(i, 5, Math.floor(now * 3 + hash2(i, 4, 9))) * W;
+      const y = hash2(i, 6, Math.floor(now * 3 + hash2(i, 4, 9))) * H;
+      ctx.beginPath();
+      ctx.ellipse(x, y, (1 + t * 4) * (W / 1400), (0.5 + t * 2) * (W / 1400), 0, 0, Math.PI * 2);
+      ctx.fill();
+    }
+  }
 
   private vignette: HTMLCanvasElement | null = null;
 
-  private drawLighting(ctx: CanvasRenderingContext2D, cam: Camera, st: GameState, rt: Runtime, night: number, now: number): void {
+  private drawLighting(ctx: CanvasRenderingContext2D, cam: Camera, st: GameState, rt: Runtime, night: number, now: number, nightAlpha: number, div: number): void {
     const W = ctx.canvas.width;
     const H = ctx.canvas.height;
-    const lw = Math.ceil(W / 2);
-    const lh = Math.ceil(H / 2);
+    const lw = Math.ceil(W / div);
+    const lh = Math.ceil(H / div);
     if (this.light.width !== lw || this.light.height !== lh) {
       this.light.width = lw;
       this.light.height = lh;
     }
     const g = this.lightCtx;
-    const ls = cam.scale / 2;
+    const ls = cam.scale / div;
     const L = cam.left;
     const T = cam.top;
     g.setTransform(1, 0, 0, 1, 0, 0);
     g.globalCompositeOperation = 'source-over';
     g.clearRect(0, 0, lw, lh);
-    g.fillStyle = `rgba(3,6,14,${0.85 * night})`;
+    g.fillStyle = `rgba(3,6,14,${nightAlpha * night})`;
     g.fillRect(0, 0, lw, lh);
     g.globalCompositeOperation = 'destination-out';
     g.setTransform(ls, 0, 0, ls, -L * ls, -T * ls);
@@ -425,6 +568,14 @@ export class WorldRenderer {
       if (sv.inside >= 0) continue;
       glow(sv.x, sv.y, 34, 0.75);
       cone(g, sv.x, sv.y, sv.facing, 135, 0.42);
+    }
+    for (const v of st.vehicles ?? []) {
+      if (v.wreck || !st.survivors.some((s) => s.inside === VEH_SEAT + v.id)) continue;
+      const fx = v.x + Math.cos(v.a) * 8;
+      const fy = v.y + Math.sin(v.a) * 8;
+      cone(g, fx, fy, v.a, 210, 0.32);
+      glow(v.x, v.y, 30, 0.7);
+      warmGlows.push([v.x - Math.cos(v.a) * 9, v.y - Math.sin(v.a) * 9, 10, 0.25]);
     }
     for (const fl of rt.flashes) {
       glow(fl.x, fl.y, 60, 0.8);

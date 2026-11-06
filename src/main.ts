@@ -14,11 +14,12 @@ import { Camera } from './render/camera';
 import { WorldRenderer, type ViewState } from './render/worldRenderer';
 import { Input } from './input';
 import { Sfx } from './audio/sfx';
+import { Music } from './audio/music';
 import { Ui, type App } from './ui/ui';
 import { initPlatform, buzz } from './platform';
-import { clearSave, hasSave, loadGame, loadPrefs, saveGame, savePrefs } from './save';
-import { DAY_LEN, SQUAD_COLORS, STRUCTS, nightness, newGame, type GameState, type OrderType, type StructKind } from './game/state';
-import { build, canBuildAt, createRuntime, fortify, orderSquad, populate, squadMembers, step, stepFx, syncFog, transfer, type Runtime } from './game/sim';
+import { clearSave, hasSave, loadGame, loadPrefs, saveGame, savePrefs, type Prefs } from './save';
+import { DAY_LEN, SQUAD_COLORS, STRUCTS, VEH_SEAT, migrate, nightness, newGame, type GameState, type OrderType, type StructKind } from './game/state';
+import { assignSurvivor, build, canBuildAt, createRuntime, fortify, orderSquad, populate, releaseVehicle, squadMembers, step, stepFx, syncFog, unloadAll, vehicleOf, type Runtime } from './game/sim';
 
 /** The town is generated from a fixed seed, so every game uses the same pre-generated map. */
 const SEED = 1337;
@@ -28,9 +29,9 @@ class Game implements App {
   st: GameState | null = null;
   rt: Runtime | null = null;
   map: MapData;
-  view: ViewState = { selectedSquad: 0, selectedBuilding: -1, placing: null, ghost: null, ghostOk: false, markers: [], time: 0 };
+  view: ViewState = { selectedSquad: 0, selectedBuilding: -1, selectedVehicle: -1, placing: null, ghost: null, ghostOk: false, markers: [], time: 0 };
   paused = false;
-  soundOn: boolean;
+  prefs: Prefs;
   mode: 'title' | 'play' = 'title';
 
   private canvas: HTMLCanvasElement;
@@ -39,6 +40,10 @@ class Game implements App {
   private renderer: WorldRenderer;
   private input: Input;
   private sfx = new Sfx();
+  private music = new Music();
+  private tension = 0;
+  private tensionTimer = 0;
+  private rainOn = -1;
   private ui: Ui;
   private acc = 0;
   private last = performance.now();
@@ -61,10 +66,11 @@ class Game implements App {
       (x, y) => this.tap(x, y),
       (x, y) => this.hover(x, y),
     );
+    this.prefs = loadPrefs();
     this.ui = new Ui(document.getElementById('ui')!, this);
-    const prefs = loadPrefs();
-    this.soundOn = prefs.sound;
-    this.sfx.enabled = prefs.sound;
+    this.sfx.enabled = this.prefs.sound;
+    this.music.enabled = this.prefs.music;
+    this.renderer.mapR.setBlur(this.prefs.quality !== 'low');
     this.resize();
     addEventListener('resize', () => this.resize());
     document.addEventListener('visibilitychange', () => {
@@ -73,7 +79,14 @@ class Game implements App {
         this.sfx.suspend();
       } else this.sfx.resume();
     });
-    addEventListener('pointerdown', () => this.sfx.unlock(), { capture: true });
+    addEventListener(
+      'pointerdown',
+      () => {
+        this.sfx.unlock();
+        if (this.sfx.context) this.music.attach(this.sfx.context);
+      },
+      { capture: true },
+    );
     this.setupBackButton();
     this.startDemo();
     this.ui.showTitle();
@@ -103,7 +116,8 @@ class Game implements App {
   }
 
   private resize(): void {
-    const dpr = Math.min(2, devicePixelRatio || 1);
+    const cap = this.prefs.quality === 'low' ? 1 : this.prefs.quality === 'balanced' ? 1.5 : 2;
+    const dpr = Math.min(cap, devicePixelRatio || 1);
     const w = innerWidth;
     const h = innerHeight;
     this.canvas.width = Math.round(w * dpr);
@@ -161,8 +175,9 @@ class Game implements App {
   }
 
   continueGame(): void {
-    const st = loadGame();
-    if (!st) return this.newGame();
+    const saved = loadGame();
+    if (!saved) return this.newGame();
+    const st = migrate(saved, this.map);
     const rt = this.freshRuntime(st);
     this.begin(st, rt);
     this.ui.banner(`Day ${st.day}`, 'Welcome back to the haven.', 'info');
@@ -175,7 +190,7 @@ class Game implements App {
     this.paused = false;
     this.endTimer = -1;
     this.acc = 0;
-    this.view = { selectedSquad: 0, selectedBuilding: -1, placing: null, ghost: null, ghostOk: false, markers: [], time: 0 };
+    this.view = { selectedSquad: 0, selectedBuilding: -1, selectedVehicle: -1, placing: null, ghost: null, ghostOk: false, markers: [], time: 0 };
     this.ui.hideScreens();
     this.ui.closePanel();
     this.ui.showHud(true);
@@ -211,10 +226,20 @@ class Game implements App {
     this.sfx.uiClick();
   }
 
-  setSound(on: boolean): void {
-    this.soundOn = on;
-    this.sfx.setEnabled(on);
-    savePrefs({ sound: on });
+  setPref<K extends keyof Prefs>(k: K, v: Prefs[K]): void {
+    this.prefs = { ...this.prefs, [k]: v };
+    savePrefs(this.prefs);
+    if (k === 'sound') this.sfx.setEnabled(!!v);
+    if (k === 'music') {
+      this.sfx.unlock();
+      if (this.sfx.context) this.music.attach(this.sfx.context);
+      this.music.setEnabled(!!v);
+    }
+    if (k === 'quality') {
+      this.renderer.mapR.setBlur(v !== 'low');
+      this.resize();
+    }
+    if (k === 'haptics' && v) void buzz();
   }
 
   setSpeed(n: number): void {
@@ -240,7 +265,7 @@ class Game implements App {
     if (!this.st) return;
     const o = this.st.squads[i].order;
     const m = squadMembers(this.st, i);
-    if (m.length && m[0].inside >= 0 && o.b !== undefined) {
+    if (m.length && m[0].inside >= 0 && m[0].inside < VEH_SEAT && o.b !== undefined) {
       const d = this.map.buildings[o.b];
       this.cam.focus(d.door.x, d.door.y);
     } else if (m.length) this.cam.focus(m[0].x, m[0].y);
@@ -251,22 +276,41 @@ class Game implements App {
     this.cam.focus(hq.x + hq.w / 2, hq.y + hq.h / 2 + 20);
   }
 
-  order(t: OrderType, b?: number): void {
+  order(t: OrderType, b?: number, v?: number): void {
     if (!this.st || !this.rt) return;
     const sq = this.view.selectedSquad;
     if (sq < 0 || !squadMembers(this.st, sq).length) return;
-    orderSquad(this.st, this.rt, sq, { t, b });
+    orderSquad(this.st, this.rt, sq, { t, b, v });
     if (b !== undefined) {
       const d = this.map.buildings[b];
       this.view.markers.push({ x: d.door.x, y: d.door.y, t: 0, c: SQUAD_COLORS[sq] });
     }
-    void buzz();
+    const veh = v !== undefined ? this.st.vehicles.find((q) => q.id === v) : null;
+    if (veh) this.view.markers.push({ x: veh.x, y: veh.y, t: 0, c: SQUAD_COLORS[sq] });
+    this.buzz();
     this.ui.update();
+  }
+
+  vehicleAction(a: 'in' | 'out' | 'leave'): void {
+    if (!this.st || !this.rt) return;
+    const sq = this.view.selectedSquad;
+    if (sq < 0) return;
+    const v = vehicleOf(this.st, sq);
+    if (a === 'in' && v) this.order('vehicle', undefined, v.id);
+    else if (a === 'out') {
+      unloadAll(this.st, this.rt, sq);
+      this.st.squads[sq].order = { t: 'idle' };
+    } else if (a === 'leave') releaseVehicle(this.st, this.rt, sq);
+    this.ui.update();
+  }
+
+  private buzz(kind: 'light' | 'heavy' = 'light'): void {
+    if (this.prefs.haptics) void buzz(kind);
   }
 
   fortify(b: number): void {
     if (!this.st || !this.rt) return;
-    if (fortify(this.st, this.rt, b)) void buzz('heavy');
+    if (fortify(this.st, this.rt, b)) this.buzz('heavy');
     this.ui.update();
   }
 
@@ -280,7 +324,7 @@ class Game implements App {
   confirmPlace(): void {
     if (!this.st || !this.rt || !this.view.placing || !this.view.ghost) return;
     if (build(this.st, this.rt, this.view.placing, this.view.ghost.x, this.view.ghost.y)) {
-      void buzz('heavy');
+      this.buzz('heavy');
       this.view.placing = null;
       this.view.ghost = null;
     }
@@ -293,9 +337,9 @@ class Game implements App {
     this.ui.update();
   }
 
-  transfer(squad: number, delta: 1 | -1): void {
+  assign(survivorId: number, squad: number): void {
     if (!this.st || !this.rt) return;
-    transfer(this.st, this.rt, squad, delta);
+    assignSurvivor(this.st, this.rt, survivorId, squad);
     this.ui.update();
   }
 
@@ -335,6 +379,23 @@ class Game implements App {
       this.click();
       return;
     }
+    // vehicles
+    let vbest = -1;
+    let vd = 14 / this.cam.zoom + 6;
+    for (const v of st.vehicles) {
+      const d = Math.hypot(v.x - w.x, v.y - w.y);
+      if (d < vd && rt.explored[Math.floor(v.y / 40) * rt.fogW + Math.floor(v.x / 40)]) {
+        vd = d;
+        vbest = v.id;
+      }
+    }
+    if (vbest >= 0) {
+      this.view.selectedVehicle = vbest;
+      this.view.selectedBuilding = -1;
+      this.ui.openPanel('vehicle');
+      this.click();
+      return;
+    }
     // buildings (smallest containing rect wins)
     const pad = 3 / this.cam.zoom;
     let hit = -1;
@@ -361,7 +422,7 @@ class Game implements App {
       const p = rt.nav.nearestFree(w.x, w.y, 6);
       orderSquad(st, rt, sq, { t: 'move', x: p.x, y: p.y });
       this.view.markers.push({ x: p.x, y: p.y, t: 0, c: SQUAD_COLORS[sq] });
-      void buzz();
+      this.buzz();
     }
   }
 
@@ -401,8 +462,24 @@ class Game implements App {
       this.view.time += dt;
       for (const m of this.view.markers) m.t += dt;
       this.view.markers = this.view.markers.filter((m) => m.t < 0.7);
-      this.renderer.render(this.ctx, this.cam, st, rt, this.view, { fog: this.mode === 'play' });
-      this.sfx.setMood(nightness(st.time));
+      this.renderer.render(this.ctx, this.cam, st, rt, this.view, { fog: this.mode === 'play', quality: this.prefs.quality, brightness: this.prefs.brightness });
+      const nt = nightness(st.time);
+      this.sfx.setMood(nt);
+      // music follows the danger: how many of the horde are close to the haven
+      this.tensionTimer -= dt;
+      if (this.tensionTimer <= 0) {
+        this.tensionTimer = 0.5;
+        const hq = this.map.buildings[this.map.hqId];
+        let near = 0;
+        for (const z of st.zombies) if ((z.mode === 2 || z.mode === 1) && Math.hypot(z.x - hq.x, z.y - hq.y) < 420) near++;
+        this.tension = this.mode === 'play' ? Math.min(1, near / 8) : 0;
+      }
+      this.music.setMood(nt, this.tension);
+      const rain = st.weather === 'rain' ? 1 : 0;
+      if (rain !== this.rainOn) {
+        this.rainOn = rain;
+        this.sfx.setRain(rain);
+      }
       if (this.mode === 'play') {
         this.hudTimer -= dt;
         if (this.hudTimer <= 0) {
@@ -427,7 +504,7 @@ class Game implements App {
       if (e.k === 'toast') this.ui.toast(e.text, e.tone);
       else if (e.k === 'banner') {
         this.ui.banner(e.title, e.sub, e.tone);
-        if (e.tone === 'bad') void buzz('heavy');
+        if (e.tone === 'bad') this.buzz('heavy');
       } else if (e.k === 'save') this.save();
       else if (e.k === 'sfx') {
         let vol = 1;

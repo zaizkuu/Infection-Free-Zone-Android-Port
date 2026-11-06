@@ -10,7 +10,7 @@ The game is built with TypeScript and HTML5 Canvas and packaged as a native Andr
 
 ## Install on your phone
 
-1. On your Android phone, open this repository on GitHub and download [`releases/EmberHaven-0.2.0-debug.apk`](releases/EmberHaven-0.2.0-debug.apk). Tap **Download raw file**.
+1. On your Android phone, open this repository on GitHub and download [`releases/EmberHaven-0.3.0-debug.apk`](releases/EmberHaven-0.3.0-debug.apk). Tap **Download raw file**.
 2. Open the downloaded file. If Android asks, allow your browser or file manager to **install unknown apps**.
 3. Tap **Install** and launch **Ember Haven**. The game runs in landscape.
 
@@ -27,7 +27,12 @@ Every push to the repository also builds a fresh APK through GitHub Actions. You
 | **Grow the haven** | Claim cleared buildings next to your haven for more beds. Rescued survivors walk to the haven and stand guard. |
 | **Fortify and build** | Barricade haven buildings (planks, then sandbags, then steel). Build watchtowers, fire barrels, gardens, workshops and infirmary tents. |
 | **Nights** | At 20:00 a horde marches on the haven from one or more directions. It gets bigger every night. Light the dark so your guards can see, and bring your squads home. |
+| **Roles** | Every survivor has a role. Soldiers hit harder and take more punishment. Scouts move faster, see further and scout quickly. Medics heal anyone near them. Engineers at the haven make building and barricades 20% cheaper and improve repairs and workshops. Scavengers make their squad scavenge faster and find extra supplies. Tap a squad card to choose exactly who goes out. |
+| **Vehicles** | Abandoned cars, a police cruiser and a delivery van are scattered around town. Repair one with materials and take it, and that squad drives any trip longer than a couple of blocks. Driving burns fuel (found at gas stations, farms and depots), makes noise, and lets you run the infected down, though that damages the vehicle. |
+| **Weather** | Each day brings clear skies, cloud, rain or fog, and it can change at midday. Rain muffles gunfire but cuts visibility; fog lets the infected get close before you see them. |
 | **Upkeep** | Each survivor eats one food at dawn. Medicine treats the badly wounded at dawn, and spare materials repair damaged walls. Gunfire is loud and attracts the infected; melee is quiet. |
+
+**Settings** (title screen or pause menu): music, sound effects, vibration, graphics quality (High, Balanced, or Battery saver for slower phones) and brightness.
 
 **Controls:** drag to pan, pinch (or use the mouse wheel) to zoom, and tap to select or command. The buttons at the top right pause the game or speed it up to 2× or 3×. The Android back button opens the pause menu.
 
@@ -82,7 +87,8 @@ src/
     worldRenderer.ts    units, overlays, lighting, fog of war, effects
     camera.ts, textures.ts
   ui/                   HUD, building cards, build menu, title and end screens, icons
-  audio/sfx.ts          procedural WebAudio sound effects
+  audio/sfx.ts          procedural WebAudio sound effects (incl. rain, engines)
+  audio/music.ts        generative ambient score that reacts to night and danger
 android/                Capacitor Android project (landscape, immersive full-screen)
 releases/               prebuilt APKs
 ```
@@ -94,11 +100,10 @@ For now the town is generated from a fixed seed (`SEED` in `src/main.ts`), so ev
 ## Roadmap ideas
 
 - Real-world locations from OpenStreetMap data
-- More survivor roles (medic, engineer, scout) and survivor traits
-- Vehicles for faster expeditions
+- Survivor traits and skills that improve with experience
 - Rival survivor groups and trading
-- Weather, seasons and more structure types
-- Music and a settings screen (graphics quality, haptics)
+- Seasons and more structure types (walls, traps, generators)
+- Fuel-powered generators and electric lights for the haven
 
 ## License
 

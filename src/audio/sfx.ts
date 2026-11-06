@@ -10,7 +10,12 @@ export class Sfx {
   private noise: AudioBuffer | null = null;
   private ambient: { src: AudioBufferSourceNode; gain: GainNode; filter: BiquadFilterNode } | null = null;
   private last: Partial<Record<SfxName, number>> = {};
+  private rain: { gain: GainNode } | null = null;
   enabled = true;
+
+  get context(): AudioContext | null {
+    return this.ctx;
+  }
 
   /** Must be called from a user gesture. */
   unlock(): void {
@@ -29,6 +34,32 @@ export class Sfx {
     const d = this.noise.getChannelData(0);
     for (let i = 0; i < len; i++) d[i] = Math.random() * 2 - 1;
     this.startAmbient();
+    this.startRain();
+  }
+
+  private startRain(): void {
+    const c = this.ctx!;
+    const src = c.createBufferSource();
+    src.buffer = this.noise;
+    src.loop = true;
+    src.playbackRate.value = 0.9;
+    const hp = c.createBiquadFilter();
+    hp.type = 'highpass';
+    hp.frequency.value = 900;
+    const lp = c.createBiquadFilter();
+    lp.type = 'lowpass';
+    lp.frequency.value = 5200;
+    const gain = c.createGain();
+    gain.gain.value = 0;
+    src.connect(hp).connect(lp).connect(gain).connect(this.master!);
+    src.start();
+    this.rain = { gain };
+  }
+
+  /** 0..1 amount of rain to hear. */
+  setRain(k: number): void {
+    if (!this.rain || !this.ctx) return;
+    this.rain.gain.gain.setTargetAtTime(k * 0.06, this.ctx.currentTime, 0.8);
   }
 
   setEnabled(on: boolean): void {
@@ -72,7 +103,7 @@ export class Sfx {
     const c = this.ctx;
     if (!c || !this.master || !this.enabled || vol <= 0.02) return;
     const now = c.currentTime;
-    const minGap: Partial<Record<SfxName, number>> = { pistol: 0.03, rifle: 0.04, hit: 0.06, zdie: 0.05, groan: 0.5, melee: 0.05, door: 0.1, tower: 0.05 };
+    const minGap: Partial<Record<SfxName, number>> = { pistol: 0.03, rifle: 0.04, hit: 0.06, zdie: 0.05, groan: 0.5, melee: 0.05, door: 0.1, tower: 0.05, engine: 1, crash: 0.08 };
     if ((this.last[name] ?? -1) + (minGap[name] ?? 0) > now) return;
     this.last[name] = now;
     switch (name) {
@@ -115,6 +146,14 @@ export class Sfx {
         break;
       case 'door':
         this.burst(now, 0.08, 500, 0.12 * vol, 'bandpass');
+        break;
+      case 'engine':
+        this.tone(now, 48, 72, 0.9, 0.16 * vol, 'sawtooth', 380);
+        this.tone(now + 0.05, 96, 120, 0.7, 0.06 * vol, 'square', 600);
+        break;
+      case 'crash':
+        this.burst(now, 0.12, 700, 0.45 * vol, 'lowpass');
+        this.thump(now, 110, 45, 0.14, 0.45 * vol);
         break;
       case 'dawn':
         this.tone(now, 392, 392, 1.2, 0.12, 'sine');

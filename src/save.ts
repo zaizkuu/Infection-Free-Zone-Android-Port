@@ -38,13 +38,20 @@ export function hasSave(): boolean {
 
 export interface Prefs {
   sound: boolean;
+  music: boolean;
+  haptics: boolean;
+  quality: 'high' | 'balanced' | 'low';
+  /** -2 (darker) .. +2 (brighter) */
+  brightness: number;
 }
+
+export const DEFAULT_PREFS: Prefs = { sound: true, music: true, haptics: true, quality: 'high', brightness: 0 };
 
 export function loadPrefs(): Prefs {
   try {
-    return { sound: true, ...(JSON.parse(localStorage.getItem(PREFS) ?? '{}') as Partial<Prefs>) };
+    return { ...DEFAULT_PREFS, ...(JSON.parse(localStorage.getItem(PREFS) ?? '{}') as Partial<Prefs>) };
   } catch {
-    return { sound: true };
+    return { ...DEFAULT_PREFS };
   }
 }
 

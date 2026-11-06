@@ -1,22 +1,28 @@
 import { I } from './icons';
 import {
-  FORT_COST,
   GOAL_DAY,
   GUNS,
+  ROLES,
   SQUAD_COLORS,
   SQUAD_NAMES,
   STRUCTS,
+  VEHICLES,
+  VEH_SEAT,
+  WEATHER,
   capacity,
   hourOf,
   isNight,
   maxHpOf,
   type GameState,
   type OrderType,
+  type Role,
   type StructKind,
+  type Survivor,
 } from '../game/state';
-import { TUTORIAL, canClaim, squadMembers, type Runtime, type Tone } from '../game/sim';
+import { TUTORIAL, canClaim, engineerAtHaven, fortCost, repairCost, squadMembers, structCost, vehicleOf, type Runtime, type Tone } from '../game/sim';
 import type { MapData } from '../world/types';
 import type { ViewState } from '../render/worldRenderer';
+import type { Prefs } from '../save';
 
 export interface App {
   st: GameState | null;
@@ -24,29 +30,32 @@ export interface App {
   map: MapData;
   view: ViewState;
   paused: boolean;
-  soundOn: boolean;
+  prefs: Prefs;
+  setPref<K extends keyof Prefs>(k: K, v: Prefs[K]): void;
   setSpeed(n: number): void;
   togglePause(): void;
   selectSquad(i: number): void;
   focusSquad(i: number): void;
-  order(t: OrderType, b?: number): void;
+  order(t: OrderType, b?: number, v?: number): void;
   fortify(b: number): void;
   startPlacing(k: StructKind): void;
   confirmPlace(): void;
   cancelPlace(): void;
-  transfer(squad: number, delta: 1 | -1): void;
+  assign(survivorId: number, squad: number): void;
+  vehicleAction(a: 'in' | 'out' | 'leave'): void;
   focusHaven(): void;
   newGame(): void;
   continueGame(): void;
   hasSave(): boolean;
   quitToTitle(): void;
-  setSound(on: boolean): void;
   click(): void;
 }
 
-type PanelMode = 'none' | 'building' | 'build' | 'squad' | 'guards';
+type PanelMode = 'none' | 'building' | 'build' | 'squad' | 'guards' | 'vehicle';
 
 const esc = (s: string) => s.replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' })[c]!);
+
+const ROLE_ICON: Record<Role, string> = { soldier: I.target, scout: I.scout, medic: I.med, engineer: I.hammer, scavenger: I.scavenge };
 
 export const LOGO = `<svg class="logo-mark" viewBox="0 0 64 64" aria-hidden="true">
   <defs><linearGradient id="lg" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#ffd29a"/><stop offset="1" stop-color="#ff6a1f"/></linearGradient></defs>
@@ -62,11 +71,12 @@ export class Ui {
   private panel: PanelMode = 'none';
   private panelKey = '';
   private resCache = '';
-  private lastRes = { food: 0, mat: 0, ammo: 0, med: 0 };
+  private lastRes = { food: 0, mat: 0, ammo: 0, med: 0, fuel: 0 };
   private squadKeys: string[] = [];
   private placeKey = '';
   private pressing = false;
-  private screen: '' | 'title' | 'howto' | 'pause' | 'end' = '';
+  private screen: '' | 'title' | 'howto' | 'pause' | 'end' | 'settings' = '';
+  private settingsBack: 'title' | 'pause' = 'title';
 
   constructor(
     root: HTMLElement,
@@ -106,7 +116,6 @@ export class Ui {
     this.screens = root.querySelector('#screens')!;
     root.querySelectorAll<HTMLElement>('[data-r]').forEach((e) => (this.el[e.dataset.r!] = e));
 
-    // squads row
     this.el.squads.innerHTML =
       SQUAD_NAMES.map(
         (n, i) => `<button class="squad panel" data-squad="${i}" style="--c:${SQUAD_COLORS[i]}">
@@ -178,6 +187,22 @@ export class Ui {
         this.app.order(act, b);
         this.closePanel();
         break;
+      case 'take':
+        this.app.order('vehicle', undefined, this.app.view.selectedVehicle);
+        this.closePanel();
+        break;
+      case 'veh-in':
+        this.app.vehicleAction('in');
+        this.panelKey = '';
+        break;
+      case 'veh-out':
+        this.app.vehicleAction('out');
+        this.panelKey = '';
+        break;
+      case 'veh-leave':
+        this.app.vehicleAction('leave');
+        this.panelKey = '';
+        break;
       case 'return':
         this.app.order('return');
         break;
@@ -198,12 +223,12 @@ export class Ui {
       case 'place-cancel':
         this.app.cancelPlace();
         break;
-      case 'add':
-        this.app.transfer(this.app.view.selectedSquad, 1);
+      case 'assign':
+        this.app.assign(Number(a.dataset.id), this.app.view.selectedSquad);
         this.panelKey = '';
         break;
-      case 'remove':
-        this.app.transfer(this.app.view.selectedSquad, -1);
+      case 'home':
+        this.app.assign(Number(a.dataset.id), -1);
         this.panelKey = '';
         break;
     }
@@ -213,6 +238,7 @@ export class Ui {
     const a = (e.target as HTMLElement).closest<HTMLElement>('[data-act]');
     if (!a) return;
     this.app.click();
+    const p = this.app.prefs;
     switch (a.dataset.act) {
       case 'new':
         this.app.newGame();
@@ -223,22 +249,31 @@ export class Ui {
       case 'howto':
         this.showHowTo();
         break;
+      case 'settings':
+        this.settingsBack = this.screen === 'pause' ? 'pause' : 'title';
+        this.showSettings();
+        break;
       case 'back':
-        if (this.app.st && !this.app.st.over) this.showPause();
+        if (this.screen === 'settings' && this.settingsBack === 'title') this.showTitle();
+        else if (this.app.st && !this.app.st.over && (this.screen !== 'howto' || this.settingsBack === 'pause' || this.app.paused)) this.showPause();
         else this.showTitle();
         break;
       case 'resume':
         this.hideScreens();
         this.app.togglePause();
         break;
-      case 'sound':
-        this.app.setSound(!this.app.soundOn);
-        if (this.screen === 'pause') this.showPause();
-        else this.showTitle();
-        break;
       case 'quit':
         this.app.quitToTitle();
         break;
+      case 'pref': {
+        const k = a.dataset.k as keyof Prefs;
+        const v = a.dataset.v!;
+        if (k === 'quality') this.app.setPref('quality', v as Prefs['quality']);
+        else if (k === 'brightness') this.app.setPref('brightness', Number(v));
+        else this.app.setPref(k, !p[k] as never);
+        this.showSettings();
+        break;
+      }
     }
   }
 
@@ -257,6 +292,7 @@ export class Ui {
 
   closePanel(): void {
     if (this.panel === 'building') this.app.view.selectedBuilding = -1;
+    if (this.panel === 'vehicle') this.app.view.selectedVehicle = -1;
     this.panel = 'none';
     this.el.card.classList.add('hidden');
   }
@@ -273,22 +309,21 @@ export class Ui {
       return;
     }
     let html = '';
-    let key: string = this.panel;
     if (this.panel === 'building') {
       const id = this.app.view.selectedBuilding;
       if (id < 0) return this.closePanel();
-      [html, key] = this.buildingCard(st, rt, id);
-    } else if (this.panel === 'build') {
-      [html, key] = this.buildSheet(st);
-    } else if (this.panel === 'squad') {
-      [html, key] = this.squadSheet(st, rt);
-    } else if (this.panel === 'guards') {
-      [html, key] = this.guardsSheet(st);
-    }
+      html = this.buildingCard(st, rt, id);
+    } else if (this.panel === 'vehicle') {
+      const id = this.app.view.selectedVehicle;
+      if (id < 0) return this.closePanel();
+      html = this.vehicleCard(st, id);
+    } else if (this.panel === 'build') html = this.buildSheet(st);
+    else if (this.panel === 'squad') html = this.squadSheet(st);
+    else if (this.panel === 'guards') html = this.guardsSheet(st);
     // Never swap the panel's buttons while a finger is on it, or the tap would be lost.
-    if (key !== this.panelKey && !this.pressing) {
+    if (html !== this.panelKey && !this.pressing) {
       this.el.card.innerHTML = html;
-      this.panelKey = key;
+      this.panelKey = html;
     }
     this.patchDynamic(st);
     this.el.card.classList.remove('hidden');
@@ -311,13 +346,26 @@ export class Ui {
       const txt = this.el.card.querySelector<HTMLElement>('[data-bhptext]');
       if (txt) txt.textContent = `${Math.max(0, Math.round(st.b[id].hp))} / ${max}`;
     }
+    const vb = this.el.card.querySelector<HTMLElement>('[data-vhp]');
+    if (vb) {
+      const v = st.vehicles.find((q) => q.id === Number(vb.dataset.vhp));
+      if (v) (vb.firstElementChild as HTMLElement).style.width = `${Math.max(0, (v.hp / VEHICLES[v.kind].hp) * 100)}%`;
+    }
   }
 
   private head(title: string, sub: string): string {
     return `<div class="card-head"><div><div class="card-title">${esc(title)}</div>${sub ? `<div class="card-sub">${esc(sub)}</div>` : ''}</div><button class="card-x" data-act="close" aria-label="Close">${I.close}</button></div>`;
   }
 
-  private buildingCard(st: GameState, rt: Runtime, id: number): [string, string] {
+  private squadChip(st: GameState, busy = false): string {
+    const sq = this.app.view.selectedSquad;
+    const n = sq >= 0 ? squadMembers(st, sq).length : 0;
+    if (!n) return `<div class="note">Squad ${SQUAD_NAMES[sq] ?? ''} has no one assigned. Tap the squad card to add survivors.</div>`;
+    const v = vehicleOf(st, sq);
+    return `<div class="squad-chip" style="--c:${SQUAD_COLORS[sq]}"><i></i>Orders go to Squad ${SQUAD_NAMES[sq]} (${n})${v ? ` · ${VEHICLES[v.kind].name}` : ''}${busy ? ' · already here' : ''}</div>`;
+  }
+
+  private buildingCard(st: GameState, rt: Runtime, id: number): string {
     const d = this.app.map.buildings[id];
     const b = st.b[id];
     const sq = this.app.view.selectedSquad;
@@ -333,34 +381,28 @@ export class Ui {
     else tags.push('<span class="tag good">Scouted</span>');
     if (b.explored && b.survivors > 0) tags.push(`<span class="tag info">${b.survivors} survivor${b.survivors > 1 ? 's' : ''}</span>`);
     let body = '';
-    const lootRow = () => {
-      const l = b.loot;
-      const cell = (ic: string, n: number, col: string) => `<div class="${n ? '' : 'zero'}" style="color:${col}">${ic}<span style="color:var(--text)">${n}</span></div>`;
-      return `<div class="loot">${cell(I.food, l.food, 'var(--food)')}${cell(I.mat, l.mat, 'var(--mat)')}${cell(I.ammo, l.ammo, 'var(--ammo)')}${cell(I.med, l.med, 'var(--med)')}${cell(I.gun, l.guns, '#b0bec5')}</div>`;
-    };
-    const lootLeft = b.loot.food + b.loot.mat + b.loot.ammo + b.loot.med + b.loot.guns;
+    const l = b.loot;
+    const lootLeft = l.food + l.mat + l.ammo + l.med + l.guns + (l.fuel || 0);
     if (b.owned) {
       body += `<div class="hpbar" data-bhp="${id}"><i></i></div>`;
       body += `<div class="kv"><span>Structure</span><b data-bhptext></b></div>`;
       body += `<div class="kv"><span>Barricades</span><b>${['None', 'Planks', 'Sandbags', 'Steel'][b.fort]}</b></div>`;
       body += `<div class="kv"><span>Beds</span><b>${d.capacity}</b></div>`;
     } else if (b.explored) {
-      body += lootRow();
+      const cell = (ic: string, n: number, col: string) => `<div class="${n ? '' : 'zero'}" style="color:${col}">${ic}<span style="color:var(--text)">${n}</span></div>`;
+      body += `<div class="loot six">${cell(I.food, l.food, 'var(--food)')}${cell(I.mat, l.mat, 'var(--mat)')}${cell(I.ammo, l.ammo, 'var(--ammo)')}${cell(I.med, l.med, 'var(--med)')}${cell(I.fuel, l.fuel || 0, 'var(--fuel)')}${cell(I.gun, l.guns, '#b0bec5')}</div>`;
       if (!lootLeft) body += `<div class="note">Picked clean.</div>`;
     } else {
       body += `<div class="note">Contents unknown. Infected may be hiding inside. Scout it first.</div>`;
     }
-    // actions
     let btns = '';
-    const n = members.length;
-    const sqName = sq >= 0 ? SQUAD_NAMES[sq] : '';
-    const noSquad = n === 0;
+    const noSquad = members.length === 0;
     if (b.owned) {
       if (b.fort < 3) {
-        const cost = FORT_COST[b.fort];
+        const cost = fortCost(st, b.fort);
         btns += `<button class="btn primary" data-act="fortify" ${st.res.mat < cost ? 'disabled' : ''}>${I.fortify}Fortify <small>${cost} mat</small></button>`;
       } else btns += `<button class="btn" disabled>${I.fortify}Max barricades</button>`;
-      if (id === this.app.map.hqId) btns += `<button class="btn" data-act="place-open">${I.hammer}Build</button>`;
+      if (id === this.app.map.hqId) btns += `<button class="btn" data-act="build">${I.hammer}Build</button>`;
       else btns += `<button class="btn" data-act="haven">${I.haven}Haven</button>`;
     } else {
       if (!b.explored) {
@@ -376,55 +418,93 @@ export class Ui {
     let footer = '';
     if (!b.owned) {
       const why = canClaim(st, rt, id);
-      if (noSquad) footer = `<div class="note">Squad ${sqName || ''} has no one assigned. Tap the squad card to add survivors.</div>`;
-      else footer = `<div class="squad-chip" style="--c:${SQUAD_COLORS[sq]}"><i></i>Orders go to Squad ${sqName} (${n})${busyHere ? ' · already here' : ''}</div>${why && b.explored ? `<div class="note" style="margin-top:4px">Claim: ${why.toLowerCase()}.</div>` : ''}`;
+      footer = this.squadChip(st, busyHere) + (why && b.explored && !noSquad ? `<div class="note" style="margin-top:4px">Claim: ${why.toLowerCase()}.</div>` : '');
     }
     const btnCount = (btns.match(/class="btn/g) || []).length;
-    const html = `${this.head(d.name, d.sub)}<div class="tags">${tags.join('')}</div>${body}<div class="btns ${btnCount === 1 ? 'one' : ''}">${btns.replace('data-act="place-open"', 'data-act="build"')}</div>${footer}`;
-    return [html, html];
+    return `${this.head(d.name, d.sub)}<div class="tags">${tags.join('')}</div>${body}<div class="btns ${btnCount === 1 ? 'one' : ''}">${btns}</div>${footer}`;
   }
 
-  private buildSheet(st: GameState): [string, string] {
+  private vehicleCard(st: GameState, id: number): string {
+    const v = st.vehicles.find((q) => q.id === id);
+    if (!v) return '';
+    const K = VEHICLES[v.kind];
+    const sq = this.app.view.selectedSquad;
+    const mine = v.squad >= 0 && v.squad === sq;
+    const tags = [`<span class="tag">${v.kind === 'van' ? 'Van' : v.kind === 'cruiser' ? 'Police car' : 'Car'}</span>`];
+    if (v.wreck) tags.push('<span class="tag bad">Wrecked</span>');
+    else if (v.squad >= 0) tags.push(`<span class="tag info">Squad ${SQUAD_NAMES[v.squad]}</span>`);
+    else if (v.broken) tags.push('<span class="tag">Needs repair</span>');
+    else tags.push('<span class="tag good">Runs</span>');
+    const range = (st.res.fuel / K.fuelPer100) * 100;
+    let body = `<div class="hpbar" data-vhp="${v.id}"><i></i></div>`;
+    body += `<div class="kv"><span>Speed</span><b>${K.speed >= 130 ? 'Fast' : K.speed >= 110 ? 'Good' : 'Slow but sturdy'}</b></div>`;
+    body += `<div class="kv"><span>Fuel stockpile</span><b>${Math.floor(st.res.fuel)} · range ≈ ${(range / 1000).toFixed(1)} km</b></div>`;
+    let btns = '';
+    const members = sq >= 0 ? squadMembers(st, sq) : [];
+    if (v.wreck) body += `<div class="note">Burnt out. Nothing left to salvage.</div>`;
+    else if (mine) {
+      const riding = members.some((m) => m.inside === VEH_SEAT + v.id);
+      btns += riding ? `<button class="btn" data-act="veh-out">${I.door}Get out</button>` : `<button class="btn primary" data-act="veh-in">${I.car}Get in</button>`;
+      btns += `<button class="btn" data-act="veh-leave">${I.close}Leave it</button>`;
+    } else if (v.squad >= 0) {
+      btns += `<button class="btn" disabled>${I.car}In use</button>`;
+    } else {
+      const cost = repairCost(st, v);
+      btns += `<button class="btn primary" data-act="take" ${!members.length || (v.broken && st.res.mat < cost) ? 'disabled' : ''}>${I.car}${v.broken ? `Repair &amp; take <small>${cost} mat</small>` : 'Take vehicle'}</button>`;
+    }
+    const note = v.wreck ? '' : `<div class="note">Squads drive on trips longer than a couple of blocks. Engines are loud, and you can run the infected down, but it damages the vehicle.</div>`;
+    const btnCount = (btns.match(/class="btn/g) || []).length;
+    return `${this.head(K.name, v.wreck ? 'Wreck' : `${Math.round((v.hp / K.hp) * 100)}% condition`)}<div class="tags">${tags.join('')}</div>${body}${btns ? `<div class="btns ${btnCount === 1 ? 'one' : ''}">${btns}</div>` : ''}${v.wreck ? '' : this.squadChip(st)}${note}`;
+  }
+
+  private buildSheet(st: GameState): string {
+    const eng = engineerAtHaven(st);
     const items = (Object.keys(STRUCTS) as StructKind[])
       .map((k) => {
         const s = STRUCTS[k];
-        const ok = st.res.mat >= s.cost;
-        return `<button class="build-item ${ok ? '' : 'no'}" data-act="place" data-kind="${k}"><div class="bi">${I[k]}</div><div><b>${s.name}</b><p>${s.desc}</p></div><div class="cost">${I.mat}${s.cost}</div></button>`;
+        const cost = structCost(st, k);
+        const ok = st.res.mat >= cost;
+        return `<button class="build-item ${ok ? '' : 'no'}" data-act="place" data-kind="${k}"><div class="bi">${I[k]}</div><div><b>${s.name}</b><p>${s.desc}</p></div><div class="cost">${I.mat}${cost}</div></button>`;
       })
       .join('');
-    const html = `${this.head('Build', 'Structures must be placed near your haven.')}<div class="build-list">${items}</div>`;
-    return [html, html];
+    return `${this.head('Build', eng ? 'An engineer at the haven cuts costs by 20%.' : 'Structures must be placed near your haven.')}<div class="build-list">${items}</div>`;
   }
 
-  private squadSheet(st: GameState, rt: Runtime): [string, string] {
+  private memberRow(m: Survivor, action: string): string {
+    const r = ROLES[m.role];
+    return `<div class="member"><div><b>${esc(m.name)}</b>${m.joining ? ' <small style="color:var(--info)">· arriving</small>' : ''}<span>${ROLE_ICON[m.role]}${r.name} · ${I.gun}${GUNS[m.gun].name}</span></div>${action}<div class="hpbar" data-hp="${m.id}"><i></i></div></div>`;
+  }
+
+  private squadSheet(st: GameState): string {
     const sq = this.app.view.selectedSquad;
     const members = squadMembers(st, sq);
-    const guards = st.survivors.filter((s) => s.squad === -1 && !s.joining).length;
-    const rows = members
-      .map(
-        (m) =>
-          `<div class="member"><b>${esc(m.name)}</b><span>${I.gun}${GUNS[m.gun].name}</span><div class="hpbar" data-hp="${m.id}"><i></i></div></div>`,
-      )
-      .join('');
-    const busy = members.some((m) => m.inside >= 0);
-    const html = `${this.head(`Squad ${SQUAD_NAMES[sq]}`, `${members.length} / 4 members · ${guards} at the haven`)}
-      ${rows || '<div class="note">No one assigned yet.</div>'}
-      <div class="stepper"><button class="btn" data-act="remove" ${!members.length || busy ? 'disabled' : ''}>${I.minus}Send home</button><button class="btn" data-act="add" ${!guards || members.length >= 4 || busy ? 'disabled' : ''}>${I.plus}Assign</button></div>
-      <div class="btns"><button class="btn" data-act="hold" ${!members.length ? 'disabled' : ''}>${I.stop}Hold</button><button class="btn" data-act="return" ${!members.length ? 'disabled' : ''}>${I.ret}Return</button></div>`;
-    void rt;
-    return [html, html];
+    const guards = st.survivors.filter((s) => s.squad === -1 && !s.joining);
+    const inBuilding = members.some((m) => m.inside >= 0 && m.inside < VEH_SEAT);
+    const riding = members.some((m) => m.inside >= VEH_SEAT);
+    const busy = inBuilding || riding;
+    const full = members.length >= 4;
+    const v = vehicleOf(st, sq);
+    const rows = members.map((m) => this.memberRow(m, `<button class="mini" data-act="home" data-id="${m.id}" ${busy ? 'disabled' : ''}>Send home</button>`)).join('');
+    const avail = guards.map((m) => this.memberRow(m, `<button class="mini" data-act="assign" data-id="${m.id}" ${busy || full ? 'disabled' : ''}>Assign</button>`)).join('');
+    let veh = '';
+    if (v) {
+      veh = `<div class="veh-row">${I.car}<div><b>${VEHICLES[v.kind].name}</b><span>${riding ? 'Driving' : 'Parked'} · ${Math.round((v.hp / VEHICLES[v.kind].hp) * 100)}% condition</span></div>
+        ${riding ? `<button class="mini" data-act="veh-out">Get out</button>` : `<button class="mini" data-act="veh-in" ${inBuilding ? 'disabled' : ''}>Get in</button>`}<button class="mini" data-act="veh-leave">Leave</button></div>`;
+    }
+    return `${this.head(`Squad ${SQUAD_NAMES[sq]}`, `${members.length} / 4 members`)}
+      ${rows || '<div class="note">No one assigned yet. Pick someone from the haven below.</div>'}
+      ${veh}
+      <div class="btns"><button class="btn" data-act="hold" ${!members.length ? 'disabled' : ''}>${I.stop}Hold</button><button class="btn" data-act="return" ${!members.length ? 'disabled' : ''}>${I.ret}Return</button></div>
+      ${busy ? '<div class="note">Members can be swapped once the squad is outside and on foot.</div>' : ''}
+      <div class="sub-title">At the haven (${guards.length})</div>
+      ${avail || '<div class="note">No one is free at the haven.</div>'}`;
   }
 
-  private guardsSheet(st: GameState): [string, string] {
+  private guardsSheet(st: GameState): string {
     const guards = st.survivors.filter((s) => s.squad === -1);
-    const rows = guards
-      .map(
-        (m) =>
-          `<div class="member"><b>${esc(m.name)}${m.joining ? ' <small style="color:var(--info)">· arriving</small>' : ''}</b><span>${I.gun}${GUNS[m.gun].name}</span><div class="hpbar" data-hp="${m.id}"><i></i></div></div>`,
-      )
-      .join('');
-    const html = `${this.head('Haven Guards', `${guards.length} survivors defend the haven and heal there`)}${rows || '<div class="note">No one is guarding the haven.</div>'}<div class="note">Assign guards to a squad from its card. Guards shoot anything that comes close.</div>`;
-    return [html, html];
+    const rows = guards.map((m) => this.memberRow(m, '')).join('');
+    const roleNotes = (Object.keys(ROLES) as Role[]).map((r) => `<div class="kv"><span>${ROLE_ICON[r]} ${ROLES[r].name}</span><b>${ROLES[r].desc}</b></div>`).join('');
+    return `${this.head('Haven Guards', `${guards.length} survivors defend the haven and heal there`)}${rows || '<div class="note">No one is guarding the haven.</div>'}<div class="sub-title">Roles</div><div class="roles">${roleNotes}</div>`;
   }
 
   // ------------------------------------------------------------------ hud updates
@@ -437,7 +517,6 @@ export class Ui {
     const st = this.app.st;
     const rt = this.app.rt;
     if (!st || !rt) return;
-    // clock
     const h = hourOf(st.time);
     const night = isNight(st.time);
     const hh = Math.floor(h);
@@ -458,6 +537,8 @@ export class Ui {
       const left = 9 - since;
       label = `Dawn in ${Math.floor(left)}h ${String(Math.floor((left % 1) * 60)).padStart(2, '0')}m${st.hordeTotal ? ` · horde from the ${st.hordeFrom}` : ''}`;
     }
+    const w = st.weather ?? 'clear';
+    if (w !== 'clear') label += ` · ${WEATHER[w].name}`;
     this.el.phase.className = `phase ${night ? 'night' : ''}`;
     (this.el.phase.firstElementChild as HTMLElement).style.width = `${Math.min(100, frac * 100)}%`;
     this.el.phaseLabel.textContent = label;
@@ -467,8 +548,8 @@ export class Ui {
     // resources
     const pop = st.survivors.length;
     const cap = capacity(this.app.map, st);
-    const r = st.res;
-    const key = `${r.food}|${r.mat}|${r.ammo}|${r.med}|${pop}|${cap}`;
+    const r = { food: st.res.food, mat: st.res.mat, ammo: st.res.ammo, med: st.res.med, fuel: Math.floor(st.res.fuel) };
+    const key = `${r.food}|${r.mat}|${r.ammo}|${r.med}|${r.fuel}|${pop}|${cap}`;
     if (key !== this.resCache) {
       const flash = (k: keyof typeof r) => (r[k] > this.lastRes[k] && this.resCache ? 'flash' : '');
       this.el.res.innerHTML = `
@@ -476,12 +557,12 @@ export class Ui {
         <div class="chip mat ${flash('mat')}" title="Materials">${I.mat}${r.mat}</div>
         <div class="chip ammo ${r.ammo < 15 ? 'low' : flash('ammo')}" title="Ammo">${I.ammo}${r.ammo}</div>
         <div class="chip med ${flash('med')}" title="Medicine">${I.med}${r.med}</div>
+        <div class="chip fuel ${flash('fuel')}" title="Fuel">${I.fuel}${r.fuel}</div>
         <div class="chip pop" title="Survivors / beds">${I.people}${pop}<small>/${cap}</small></div>`;
       this.resCache = key;
       this.lastRes = { ...r };
       setTimeout(() => this.el.res.querySelectorAll('.flash').forEach((c) => c.classList.remove('flash')), 900);
     }
-    // speed
     this.el.speed.querySelectorAll<HTMLElement>('[data-speed]').forEach((b) => {
       const s = Number(b.dataset.speed);
       b.classList.toggle('on', this.app.paused ? s === 0 : s === st.speed && s > 0);
@@ -497,8 +578,15 @@ export class Ui {
       if (i >= 0) {
         const o = st.squads[i].order;
         const bname = o.b !== undefined ? this.app.map.buildings[o.b].name : '';
+        const riding = members.length > 0 && members.every((m) => m.inside >= VEH_SEAT);
         if (!members.length) status = 'No members';
-        else if (o.phase === 'inside') {
+        else if (o.drive === 'drive') {
+          status = o.b !== undefined ? `Driving to ${bname}` : 'Driving';
+          cls = 'busy';
+        } else if (o.drive === 'board' || o.t === 'vehicle') {
+          status = 'To the vehicle';
+          cls = 'busy';
+        } else if (o.phase === 'inside') {
           prog = Math.min(1, (o.timer ?? 0) / (o.total || 1));
           const explored = st.b[o.b!].explored;
           status = `${!explored ? 'Scouting' : o.t === 'scavenge' ? 'Scavenging' : o.t === 'claim' ? 'Claiming' : 'Searching'} ${Math.round(prog * 100)}%`;
@@ -515,9 +603,9 @@ export class Ui {
         } else if (o.t !== 'idle' && o.phase === 'go') {
           status = `To ${bname}`;
           cls = 'busy';
-        }
+        } else if (riding) status = 'In the vehicle';
       } else status = members.length ? 'Guarding' : 'Unguarded';
-      const pips = members.map((m) => `<div class="pip"><i style="width:${(m.hp / m.maxHp) * 100}%"></i></div>`).join('');
+      const pips = members.map((m) => `<div class="pip"><i style="width:${Math.round((m.hp / m.maxHp) * 20) * 5}%"></i></div>`).join('');
       const k = `${status}|${cls}|${pips}|${prog.toFixed(2)}|${this.app.view.selectedSquad}`;
       if (this.squadKeys[idx] === k) return;
       this.squadKeys[idx] = k;
@@ -531,14 +619,13 @@ export class Ui {
       card.classList.toggle('sel', i >= 0 && this.app.view.selectedSquad === i);
       card.classList.toggle('empty', !members.length);
     });
-    // panel
     if (this.panel !== 'none') this.renderPanel();
-    // placement bar
     const v = this.app.view;
     if (v.placing) {
       const s = STRUCTS[v.placing];
+      const cost = structCost(st, v.placing);
       const msg = v.ghost ? (v.ghostOk ? `Place <b>${s.name}</b> here?` : `<span class="msg bad">Can't build here</span>`) : `Tap near your haven to place <b>${s.name}</b>`;
-      const html = `<div class="msg">${msg}</div><button class="btn" data-act="place-cancel">${I.close}</button>${v.ghost && v.ghostOk ? `<button class="btn primary" data-act="place-ok">${I.check}Build <small>${s.cost}</small></button>` : ''}`;
+      const html = `<div class="msg">${msg}</div><button class="btn" data-act="place-cancel">${I.close}</button>${v.ghost && v.ghostOk ? `<button class="btn primary" data-act="place-ok">${I.check}Build <small>${cost}</small></button>` : ''}`;
       if (this.placeKey !== html) {
         this.el.placebar.innerHTML = html;
         this.placeKey = html;
@@ -586,24 +673,48 @@ export class Ui {
         ${save ? `<button class="btn primary" data-act="continue">${I.play}Continue</button>` : ''}
         <button class="btn ${save ? '' : 'primary'}" data-act="new">${I.flame}New game</button>
         <button class="btn" data-act="howto">${I.info}How to play</button>
-        <button class="btn" data-act="sound">${this.app.soundOn ? I.sound : I.mute}Sound <small>${this.app.soundOn ? 'On' : 'Off'}</small></button>
+        <button class="btn" data-act="settings">${I.gear}Settings</button>
       </div>
-      <div class="foot">v0.2 prototype · pre-generated town map</div>
+      <div class="foot">v0.3 prototype · pre-generated town map</div>
     </div></div>`;
   }
 
   showHowTo(): void {
+    if (this.screen === 'pause') this.settingsBack = 'pause';
+    else if (this.screen === 'title') this.settingsBack = 'title';
     this.screen = 'howto';
     const tip = (ic: string, t: string, p: string) => `<div class="tip"><div class="bi">${ic}</div><div><b>${t}</b><p>${p}</p></div></div>`;
     this.screens.innerHTML = `<div class="screen dim"><div class="modal panel">
       <h2>How to play</h2>
       <div class="tips">
-        ${tip(I.people, 'Command squads', 'Tap a squad card to select it. Tap the ground to move, or tap a building for orders. Tap the card again to manage members.')}
+        ${tip(I.people, 'Command squads', 'Tap a squad card to select it. Tap the ground to move, or tap a building for orders. Tap the card again to swap members.')}
         ${tip(I.scout, 'Scout & scavenge', 'Scouting reveals supplies, infected and survivors. Scavenging brings everything back to your stockpile.')}
-        ${tip(I.claim, 'Grow the haven', 'Claim cleared buildings next to your haven for more beds. Survivors you rescue move in and stand guard.')}
+        ${tip(I.target, 'Roles matter', 'Soldiers fight, scouts move and see further, medics heal, engineers cut building costs, scavengers find more.')}
+        ${tip(I.car, 'Vehicles', 'Repair abandoned cars and squads will drive longer trips. Driving burns fuel and makes noise.')}
+        ${tip(I.claim, 'Grow the haven', 'Claim cleared buildings next to your haven for more beds. Rescued survivors move in and stand guard.')}
         ${tip(I.fortify, 'Fortify & build', 'Barricade haven buildings and build watchtowers, fire barrels, gardens, workshops and infirmaries.')}
         ${tip(I.moon, 'Nights are deadly', 'At 20:00 a horde marches on the haven. Light the dark so guards can see, and bring squads home.')}
-        ${tip(I.food, 'Keep everyone fed', 'Each survivor eats one food at dawn. Gunfire makes noise and draws the infected in; melee is quiet.')}
+        ${tip(I.rain, 'Weather', 'Rain muffles gunfire but cuts visibility. Fog hides the infected until they are close.')}
+      </div>
+      <div class="row"><button class="btn primary" data-act="back">${I.ret}Back</button></div>
+    </div></div>`;
+  }
+
+  showSettings(): void {
+    this.screen = 'settings';
+    const p = this.app.prefs;
+    const toggle = (k: 'music' | 'sound' | 'haptics', ic: string, label: string) =>
+      `<div class="set-row"><span>${ic}${label}</span><button class="switch ${p[k] ? 'on' : ''}" data-act="pref" data-k="${k}" aria-pressed="${p[k]}"><i></i></button></div>`;
+    const seg = <T extends string | number>(k: 'quality' | 'brightness', opts: [T, string][], cur: T) =>
+      `<div class="seg-ctl">${opts.map(([v, l]) => `<button class="${v === cur ? 'on' : ''}" data-act="pref" data-k="${k}" data-v="${v}">${l}</button>`).join('')}</div>`;
+    this.screens.innerHTML = `<div class="screen dim"><div class="modal panel" style="width:min(480px,100%)">
+      <h2>Settings</h2>
+      <div class="settings">
+        ${toggle('music', I.music, 'Music')}
+        ${toggle('sound', I.sound, 'Sound effects')}
+        ${toggle('haptics', I.vibrate, 'Vibration')}
+        <div class="set-row col"><span>${I.gear}Graphics</span>${seg('quality', [['high', 'High'], ['balanced', 'Balanced'], ['low', 'Battery saver']], p.quality)}</div>
+        <div class="set-row col"><span>${I.sun}Brightness</span>${seg('brightness', [[-2, 'Darker'], [-1, '−'], [0, 'Default'], [1, '+'], [2, 'Brighter']], p.brightness)}</div>
       </div>
       <div class="row"><button class="btn primary" data-act="back">${I.ret}Back</button></div>
     </div></div>`;
@@ -616,7 +727,7 @@ export class Ui {
       <div class="menu" style="width:100%">
         <button class="btn primary" data-act="resume">${I.play}Resume</button>
         <button class="btn" data-act="howto">${I.info}How to play</button>
-        <button class="btn" data-act="sound">${this.app.soundOn ? I.sound : I.mute}Sound <small>${this.app.soundOn ? 'On' : 'Off'}</small></button>
+        <button class="btn" data-act="settings">${I.gear}Settings</button>
         <button class="btn" data-act="quit">${I.ret}Save &amp; quit to title</button>
       </div></div></div>`;
   }

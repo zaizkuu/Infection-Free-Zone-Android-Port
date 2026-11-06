@@ -1,4 +1,4 @@
-import { Rng } from '../core/rng';
+import { Rng, hash2 } from '../core/rng';
 import { clamp, rectsOverlap, type Rect, type Vec } from '../core/math';
 import type {
   Area,
@@ -943,7 +943,7 @@ export function generateMap(seed: number): MapData {
   // Clear the HQ's own loot & infected (you start there).
   hq.infected = 0;
   hq.survivors = 0;
-  hq.loot = { food: 0, mat: 0, ammo: 0, med: 0, guns: 0 };
+  hq.loot = { food: 0, mat: 0, ammo: 0, med: 0, guns: 0, fuel: 0 };
 
   const entries: Vec[] = [
     { x: xs[mi], y: 10 },
@@ -1054,7 +1054,7 @@ const LOOT: Record<BuildingKind, LootSpec> = {
 
 function rollLoot(kind: BuildingKind, rng: Rng): Loot {
   const spec = LOOT[kind];
-  const l: Loot = { food: 0, mat: 0, ammo: 0, med: 0, guns: 0 };
+  const l: Loot = { food: 0, mat: 0, ammo: 0, med: 0, guns: 0, fuel: 0 };
   for (const k of Object.keys(spec) as (keyof Loot)[]) {
     const [a, b, p = 1] = spec[k]!;
     if (rng.chance(p)) l[k] = rng.int(a, b);
@@ -1108,4 +1108,38 @@ function rollSurvivors(kind: BuildingKind, rng: Rng): number {
   const s = SURVIVORS[kind];
   if (!s) return 0;
   return rng.chance(s[2]) ? rng.int(s[0], s[1]) : 0;
+}
+
+/**
+ * Abandoned vehicles that can be repaired and driven. Picked deterministically from the
+ * map's parked cars so the static renderer, the nav grid and the game all agree.
+ */
+export function vehicleSpots(map: MapData): number[] {
+  const hq = map.buildings[map.hqId];
+  const hx = hq.x + hq.w / 2;
+  const hy = hq.y + hq.h / 2;
+  const out: number[] = [];
+  const far = (i: number) => out.every((j) => Math.hypot(map.props[i].x - map.props[j].x, map.props[i].y - map.props[j].y) > 160);
+  const pick = (pred: (p: Prop) => boolean, n: number) => {
+    const cands = map.props
+      .map((_, i) => i)
+      .filter((i) => {
+        const p = map.props[i];
+        return p.solid && p.c !== '#2a2522' && p.x > 40 && p.y > 40 && p.x < map.width - 40 && p.y < map.height - 40 && pred(p);
+      })
+      .sort((a, b) => hash2(a, map.seed, 5) - hash2(b, map.seed, 5));
+    let k = 0;
+    for (const i of cands) {
+      if (k >= n) break;
+      if (!far(i)) continue;
+      out.push(i);
+      k++;
+    }
+  };
+  const d = (p: Prop) => Math.hypot(p.x - hx, p.y - hy);
+  pick((p) => p.kind === 'police', 1);
+  pick((p) => p.kind === 'truck' && d(p) > 250, 1);
+  pick((p) => p.kind === 'car' && d(p) > 160 && d(p) < 600, 2);
+  pick((p) => p.kind === 'car' && d(p) >= 600, 2);
+  return out;
 }

@@ -10,7 +10,11 @@ import {
   FORT_COST,
   GOAL_DAY,
   GUNS,
+  ROLE_LIST,
   STRUCTS,
+  VEHICLES,
+  VEH_SEAT,
+  WEATHER,
   ZKINDS,
   capacity,
   hourOf,
@@ -21,6 +25,8 @@ import {
   type Order,
   type StructKind,
   type Survivor,
+  type Vehicle,
+  type Weather,
   type Zombie,
 } from './state';
 
@@ -32,7 +38,7 @@ export type GameEvent =
   | { k: 'banner'; title: string; sub: string; tone: Tone }
   | { k: 'sfx'; name: SfxName; x: number; y: number }
   | { k: 'save' };
-export type SfxName = 'pistol' | 'rifle' | 'melee' | 'hit' | 'zdie' | 'sdie' | 'groan' | 'alarm' | 'build' | 'loot' | 'door' | 'dawn' | 'tower';
+export type SfxName = 'pistol' | 'rifle' | 'melee' | 'hit' | 'zdie' | 'sdie' | 'groan' | 'alarm' | 'build' | 'loot' | 'door' | 'dawn' | 'tower' | 'engine' | 'crash';
 
 export interface Tracer {
   x1: number;
@@ -146,6 +152,36 @@ export function hq(rt: Runtime) {
   return rt.map.buildings[rt.map.hqId];
 }
 
+/** Engineers guarding the haven make construction cheaper. */
+export function engineerAtHaven(st: GameState): boolean {
+  return st.survivors.some((s) => s.squad === -1 && !s.joining && s.role === 'engineer');
+}
+
+export function fortCost(st: GameState, level: number): number {
+  return Math.round(FORT_COST[level] * (engineerAtHaven(st) ? 0.8 : 1));
+}
+
+export function structCost(st: GameState, kind: StructKind): number {
+  return Math.round(STRUCTS[kind].cost * (engineerAtHaven(st) ? 0.8 : 1));
+}
+
+export function repairCost(st: GameState, v: Vehicle): number {
+  const eng = st.survivors.some((s) => s.squad >= 0 && s.role === 'engineer' && dist(s.x, s.y, v.x, v.y) < 40);
+  return Math.round(VEHICLES[v.kind].repair * (eng ? 0.6 : 1));
+}
+
+export function vehicleOf(st: GameState, squad: number): Vehicle | null {
+  const id = st.squads[squad]?.vehicle ?? -1;
+  return st.vehicles.find((v) => v.id === id && !v.wreck) ?? null;
+}
+
+export function aboard(s: Survivor): boolean {
+  return s.inside >= VEH_SEAT;
+}
+
+const hasRole = (list: Survivor[], r: Survivor['role']) => list.some((s) => s.role === r);
+const weatherOf = (st: GameState) => WEATHER[st.weather ?? 'clear'];
+
 export function ownedIds(st: GameState): number[] {
   const out: number[] = [];
   st.b.forEach((b, i) => b.owned && out.push(i));
@@ -253,6 +289,39 @@ export function orderSquad(st: GameState, rt: Runtime, squad: number, order: Ord
   // leaving a building early collects what was found so far
   exitBuilding(st, rt, squad, true);
   sq.order = { ...order, phase: 'go', timer: 0, total: 0 };
+  if (order.t === 'vehicle') {
+    const v = st.vehicles.find((q) => q.id === order.v);
+    if (!v || v.wreck) return;
+    if (members.every((m) => m.inside === VEH_SEAT + v.id)) {
+      sq.order = { t: 'idle' };
+      return;
+    }
+    unloadAll(st, rt, squad);
+    pathMembers(rt, members, v.x, v.y);
+    sfx(rt, 'door', members[0].x, members[0].y);
+    return;
+  }
+  // Use the squad's vehicle for longer trips (or if they're already in it).
+  const veh = vehicleOf(st, squad);
+  const dest = orderDest(rt, order);
+  if (veh && dest && order.t !== 'idle') {
+    const riding = members.every((m) => m.inside === VEH_SEAT + veh.id);
+    const lead = members[0];
+    const far = dist(lead.x, lead.y, dest.x, dest.y) > 220 && dist(lead.x, lead.y, veh.x, veh.y) < dist(lead.x, lead.y, dest.x, dest.y) * 0.6;
+    if (riding || far) {
+      if (st.res.fuel <= 0) {
+        toast(rt, 'No fuel. The squad will walk.', 'warn');
+        unloadAll(st, rt, squad);
+      } else {
+        sq.order.drive = riding ? 'drive' : 'board';
+        if (riding) startDrive(st, rt, veh, dest);
+        else pathMembers(rt, members, veh.x, veh.y);
+        return;
+      }
+    }
+  } else if (veh && order.t === 'idle') {
+    veh.path = null;
+  }
   if (order.t === 'move') pathMembers(rt, members, order.x!, order.y!);
   else if (order.t === 'return') {
     const d = hq(rt).door;
@@ -264,6 +333,64 @@ export function orderSquad(st: GameState, rt: Runtime, squad: number, order: Ord
     pathMembers(rt, members, b.door.x, b.door.y);
   }
   sfx(rt, 'door', members[0].x, members[0].y);
+}
+
+function orderDest(rt: Runtime, o: Order): Vec | null {
+  if (o.t === 'move') return { x: o.x!, y: o.y! };
+  if (o.t === 'return') return hq(rt).door;
+  if (o.b !== undefined) return rt.map.buildings[o.b].door;
+  return null;
+}
+
+function startDrive(_st: GameState, rt: Runtime, v: Vehicle, dest: Vec): void {
+  const p = rt.nav.findPath(v.x, v.y, dest.x, dest.y);
+  if (!p) {
+    toast(rt, `The ${VEHICLES[v.kind].name} can't get there.`, 'warn');
+    v.path = null;
+    return;
+  }
+  v.path = p;
+  sfx(rt, 'engine', v.x, v.y);
+}
+
+/** Puts every member of the squad who is riding back on the ground next to the vehicle. */
+export function unloadAll(st: GameState, rt: Runtime, squad: number): void {
+  const members = squadMembers(st, squad).filter(aboard);
+  if (!members.length) return;
+  const v = st.vehicles.find((q) => VEH_SEAT + q.id === members[0].inside);
+  if (!v) {
+    for (const m of members) m.inside = -1;
+    return;
+  }
+  v.path = null;
+  const side = v.a + Math.PI / 2;
+  members.forEach((m, i) => {
+    const f = FORMATION[i % FORMATION.length];
+    const p = rt.nav.nearestFree(v.x + Math.cos(side) * 11 + f.x * 0.5, v.y + Math.sin(side) * 11 + f.y * 0.5, 5);
+    m.inside = -1;
+    m.x = p.x;
+    m.y = p.y;
+    m.path = null;
+  });
+  sfx(rt, 'door', v.x, v.y);
+}
+
+function board(_st: GameState, v: Vehicle, members: Survivor[]): void {
+  for (const m of members) {
+    m.inside = VEH_SEAT + v.id;
+    m.x = v.x;
+    m.y = v.y;
+    m.path = null;
+  }
+}
+
+/** Squad gives up its vehicle (it stays parked where it is). */
+export function releaseVehicle(st: GameState, rt: Runtime, squad: number): void {
+  const v = vehicleOf(st, squad);
+  unloadAll(st, rt, squad);
+  if (v) v.squad = -1;
+  st.squads[squad].vehicle = -1;
+  if (st.squads[squad].order.drive) st.squads[squad].order = { t: 'idle' };
 }
 
 function exitBuilding(st: GameState, rt: Runtime, squad: number, partial: boolean): void {
@@ -290,16 +417,24 @@ function exitBuilding(st: GameState, rt: Runtime, squad: number, partial: boolea
 
 function collectLoot(st: GameState, rt: Runtime, id: number, frac: number, members: Survivor[]): void {
   const bs = st.b[id];
-  const got = { food: 0, mat: 0, ammo: 0, med: 0, guns: 0 };
-  for (const k of ['food', 'mat', 'ammo', 'med', 'guns'] as const) {
-    const n = frac >= 1 ? bs.loot[k] : Math.floor(bs.loot[k] * frac);
+  const got = { food: 0, mat: 0, ammo: 0, med: 0, guns: 0, fuel: 0 };
+  for (const k of ['food', 'mat', 'ammo', 'med', 'guns', 'fuel'] as const) {
+    const have = bs.loot[k] || 0;
+    const n = frac >= 1 ? have : Math.floor(have * frac);
     got[k] = n;
-    bs.loot[k] -= n;
+    bs.loot[k] = have - n;
+  }
+  // scavengers turn up a little extra
+  if (hasRole(members, 'scavenger') && frac >= 1) {
+    got.food += Math.ceil(got.food * 0.25);
+    got.mat += Math.ceil(got.mat * 0.25);
+    got.ammo += Math.ceil(got.ammo * 0.15);
   }
   st.res.food += got.food;
   st.res.mat += got.mat;
   st.res.ammo += got.ammo;
   st.res.med += got.med;
+  st.res.fuel += got.fuel;
   // firearms upgrade survivors: melee -> pistol, then pistol -> rifle
   let guns = got.guns;
   const pool = [...members, ...st.survivors.filter((s) => !members.includes(s))];
@@ -318,6 +453,7 @@ function collectLoot(st: GameState, rt: Runtime, id: number, frac: number, membe
   if (got.mat) parts.push(`${got.mat} materials`);
   if (got.ammo) parts.push(`${got.ammo} ammo`);
   if (got.med) parts.push(`${got.med} medicine`);
+  if (got.fuel) parts.push(`${got.fuel} fuel`);
   if (got.guns) parts.push(`${got.guns} firearm${got.guns > 1 ? 's' : ''}`);
   const name = rt.map.buildings[id].name;
   if (parts.length) {
@@ -356,12 +492,14 @@ function rescue(st: GameState, rt: Runtime, id: number): void {
       goal: { x: h.door.x, y: h.door.y },
       cd: 0,
       inside: -1,
+      role: ROLE_LIST[rt.rng.int(0, ROLE_LIST.length - 1)],
       post: null,
       kills: 0,
       anim: rt.rng.next() * 10,
       repath: 0,
       joining: true,
     };
+    if (s.role === 'soldier') s.maxHp = 120;
     st.survivors.push(s);
   }
   st.stats.rescued += n;
@@ -375,6 +513,88 @@ function updateSquads(st: GameState, rt: Runtime, dt: number): void {
     const members = squadMembers(st, sq.id);
     if (!members.length) {
       if (o.t !== 'idle') sq.order = { t: 'idle' };
+      if (sq.vehicle >= 0) {
+        const v = st.vehicles.find((q) => q.id === sq.vehicle);
+        if (v) v.squad = -1;
+        sq.vehicle = -1;
+      }
+      continue;
+    }
+    if (o.t === 'vehicle') {
+      const v = st.vehicles.find((q) => q.id === o.v);
+      if (!v || v.wreck) {
+        sq.order = { t: 'idle' };
+        continue;
+      }
+      const near = members.some((m) => dist(m.x, m.y, v.x, v.y) < 20);
+      if (!near && members.every((m) => !m.path)) {
+        toast(rt, `Squad can't reach the ${VEHICLES[v.kind].name}.`, 'warn');
+        sq.order = { t: 'idle' };
+      }
+      if (!near) continue;
+      if (v.squad >= 0 && v.squad !== sq.id) {
+        toast(rt, `Squad ${['Alpha', 'Bravo', 'Charlie'][v.squad]} already uses that vehicle.`, 'warn');
+        sq.order = { t: 'idle' };
+        continue;
+      }
+      if (v.broken) {
+        const cost = repairCost(st, v);
+        if (st.res.mat < cost) {
+          toast(rt, `Need ${cost} materials to repair the ${VEHICLES[v.kind].name}.`, 'warn');
+          sq.order = { t: 'idle' };
+          continue;
+        }
+        st.res.mat -= cost;
+        v.broken = false;
+        toast(rt, `The ${VEHICLES[v.kind].name} is running again (-${cost} materials).`, 'good');
+        for (let i = 0; i < 10; i++) spark(rt, v.x + rt.rng.range(-8, 8), v.y + rt.rng.range(-5, 5), '#ffcc80');
+      }
+      if (sq.vehicle >= 0 && sq.vehicle !== v.id) {
+        const old = st.vehicles.find((q) => q.id === sq.vehicle);
+        if (old) old.squad = -1;
+      }
+      sq.vehicle = v.id;
+      v.squad = sq.id;
+      board(st, v, members);
+      sfx(rt, 'engine', v.x, v.y);
+      toast(rt, `Squad ${['Alpha', 'Bravo', 'Charlie'][sq.id]} took the ${VEHICLES[v.kind].name}. Long trips are now driven.`, 'good');
+      sq.order = { t: 'idle' };
+      continue;
+    }
+    if (o.drive) {
+      const v = vehicleOf(st, sq.id);
+      const dest = orderDest(rt, o);
+      if (!v || !dest) {
+        delete o.drive;
+        unloadAll(st, rt, sq.id);
+        continue;
+      }
+      if (o.drive === 'board') {
+        const allClose = members.every((m) => dist(m.x, m.y, v.x, v.y) < 18 || (!m.path && dist(m.x, m.y, v.x, v.y) < 34));
+        if (allClose) {
+          board(st, v, members);
+          o.drive = 'drive';
+          startDrive(st, rt, v, dest);
+          if (!v.path) {
+            delete o.drive;
+            unloadAll(st, rt, sq.id);
+            pathMembers(rt, members, dest.x, dest.y);
+          }
+        } else if (members.every((m) => !m.path)) {
+          delete o.drive;
+          pathMembers(rt, members, dest.x, dest.y);
+        }
+        continue;
+      }
+      // driving: wait until the vehicle arrives (or stops)
+      if (v.path && v.path.length) continue;
+      delete o.drive;
+      unloadAll(st, rt, sq.id);
+      if (o.t === 'move' || o.t === 'return') {
+        sq.order = { t: 'idle' };
+        continue;
+      }
+      pathMembers(rt, members, dest.x, dest.y);
       continue;
     }
     if (o.t === 'idle' || o.phase === 'done') continue;
@@ -429,7 +649,7 @@ function updateSquads(st: GameState, rt: Runtime, dt: number): void {
             continue;
           }
           if (o.t === 'scavenge') {
-            o.total = scavengeTime(st, id, members.length);
+            o.total = scavengeTime(st, id, members);
             continue;
           }
           if (o.t === 'claim') {
@@ -466,10 +686,10 @@ function updateSquads(st: GameState, rt: Runtime, dt: number): void {
   }
 }
 
-function scavengeTime(st: GameState, id: number, n: number): number {
+function scavengeTime(st: GameState, id: number, members: Survivor[]): number {
   const l = st.b[id].loot;
-  const units = l.food + l.mat + l.ammo + l.med + l.guns * 5;
-  return 2 + (units * 0.6) / Math.max(1, n);
+  const units = l.food + l.mat + l.ammo + l.med + (l.fuel || 0) + l.guns * 5;
+  return (2 + (units * 0.6) / Math.max(1, members.length)) * (hasRole(members, 'scavenger') ? 0.65 : 1);
 }
 
 function enterBuilding(st: GameState, rt: Runtime, squad: number, members: Survivor[]): void {
@@ -480,8 +700,8 @@ function enterBuilding(st: GameState, rt: Runtime, squad: number, members: Survi
   const bs = st.b[id];
   o.phase = 'inside';
   o.timer = 0;
-  if (!bs.explored || (o.t === 'scout' && bs.survivors > 0)) o.total = 2.5 + (bd.w * bd.h) / 2500;
-  else if (o.t === 'scavenge') o.total = scavengeTime(st, id, members.length);
+  if (!bs.explored || (o.t === 'scout' && bs.survivors > 0)) o.total = (2.5 + (bd.w * bd.h) / 2500) * (hasRole(members, 'scout') ? 0.6 : 1);
+  else if (o.t === 'scavenge') o.total = scavengeTime(st, id, members);
   else if (o.t === 'claim') o.total = 3;
   else o.total = 1;
   members.forEach((m) => {
@@ -496,7 +716,7 @@ function enterBuilding(st: GameState, rt: Runtime, squad: number, members: Survi
 export function fortify(st: GameState, rt: Runtime, id: number): boolean {
   const bs = st.b[id];
   if (!bs.owned || bs.fort >= 3) return false;
-  const cost = FORT_COST[bs.fort];
+  const cost = fortCost(st, bs.fort);
   if (st.res.mat < cost) {
     toast(rt, `Need ${cost} materials to fortify.`, 'warn');
     return false;
@@ -514,7 +734,7 @@ export function fortify(st: GameState, rt: Runtime, id: number): boolean {
 
 export function canBuildAt(st: GameState, rt: Runtime, kind: StructKind, x: number, y: number): string | null {
   const r = STRUCTS[kind].r;
-  if (st.res.mat < STRUCTS[kind].cost) return `Need ${STRUCTS[kind].cost} materials`;
+  if (st.res.mat < structCost(st, kind)) return `Need ${structCost(st, kind)} materials`;
   if (distToBase(st, rt, x, y) > BUILD_RANGE) return 'Too far from your haven';
   for (let dx = -r; dx <= r; dx += CELL / 2)
     for (let dy = -r; dy <= r; dy += CELL / 2) if (rt.nav.isBlocked(x + dx, y + dy)) return 'Something is in the way';
@@ -528,7 +748,7 @@ export function build(st: GameState, rt: Runtime, kind: StructKind, x: number, y
     toast(rt, why, 'warn');
     return false;
   }
-  st.res.mat -= STRUCTS[kind].cost;
+  st.res.mat -= structCost(st, kind);
   st.structures.push({ id: st.nextId++, kind, x, y, hp: STRUCTS[kind].hp, cd: 0, t: 0 });
   st.stats.built++;
   if (kind === 'tower' || kind === 'workshop' || kind === 'infirmary') {
@@ -552,7 +772,7 @@ export function transfer(st: GameState, rt: Runtime, squad: number, delta: 1 | -
       return false;
     }
     if (members.some((m) => m.inside >= 0)) {
-      toast(rt, 'Wait until the squad is back outside.', 'warn');
+      toast(rt, 'Wait until the squad is outside and on foot.', 'warn');
       return false;
     }
     const guards = st.survivors.filter((s) => s.squad === -1 && !s.joining).sort((a, b) => b.gun - a.gun || b.hp - a.hp);
@@ -575,12 +795,48 @@ export function transfer(st: GameState, rt: Runtime, squad: number, delta: 1 | -
     const members = squadMembers(st, squad);
     if (!members.length) return false;
     if (members.some((m) => m.inside >= 0)) {
-      toast(rt, 'Wait until the squad is back outside.', 'warn');
+      toast(rt, 'Wait until the squad is outside and on foot.', 'warn');
       return false;
     }
     const m = members[members.length - 1];
     m.squad = -1;
     m.post = null;
+  }
+  rt.postsDirty = true;
+  return true;
+}
+
+/** Moves one specific survivor into a squad (or home to the haven with squad = -1). */
+export function assignSurvivor(st: GameState, rt: Runtime, id: number, squad: number): boolean {
+  const s = st.survivors.find((x) => x.id === id);
+  if (!s || s.joining) return false;
+  if (squad >= 0) {
+    const members = squadMembers(st, squad);
+    if (members.length >= 4) {
+      toast(rt, 'A squad can have at most 4 members.', 'warn');
+      return false;
+    }
+    if (members.some((m) => m.inside >= 0) || s.inside >= 0) {
+      toast(rt, 'Wait until the squad is outside and on foot.', 'warn');
+      return false;
+    }
+    s.squad = squad;
+    s.post = null;
+    const lead = members[0];
+    if (lead) {
+      s.goal = rt.nav.nearestFree(lead.x + 8, lead.y + 8, 4);
+      s.path = rt.nav.findPath(s.x, s.y, s.goal.x, s.goal.y);
+    } else {
+      s.path = null;
+      st.squads[squad].order = { t: 'idle' };
+    }
+  } else {
+    if (s.inside >= 0) {
+      toast(rt, 'Wait until the squad is outside and on foot.', 'warn');
+      return false;
+    }
+    s.squad = -1;
+    s.post = null;
   }
   rt.postsDirty = true;
   return true;
@@ -648,13 +904,16 @@ function shoot(st: GameState, rt: Runtime, sx: number, sy: number, z: Zombie, gu
   const g = GUNS[gun];
   st.res.ammo--;
   const night = isNight(st.time);
-  const hit = rt.rng.chance(g.acc * accMul * (night ? 0.88 : 1));
+  const soldier = shooter?.role === 'soldier';
+  if (soldier) accMul *= 1.12;
+  if (st.weather === 'rain' || st.weather === 'fog') accMul *= 0.92;
+  const hit = rt.rng.chance(Math.min(0.98, g.acc * accMul * (night ? 0.88 : 1)));
   const ex = hit ? z.x : z.x + rt.rng.range(-14, 14);
   const ey = hit ? z.y : z.y + rt.rng.range(-14, 14);
   rt.tracers.push({ x1: sx, y1: sy, x2: ex, y2: ey, t: 0 });
   rt.flashes.push({ x: sx, y: sy, t: 0 });
-  if (hit) damageZombie(st, rt, z, g.dmg * rt.rng.range(0.85, 1.15), shooter);
-  noise(rt, sx, sy, g.noise);
+  if (hit) damageZombie(st, rt, z, g.dmg * (soldier ? 1.25 : 1) * rt.rng.range(0.85, 1.15), shooter);
+  noise(rt, sx, sy, g.noise * weatherOf(st).noise);
   sfx(rt, gun === 2 ? 'rifle' : 'pistol', sx, sy);
 }
 
@@ -745,7 +1004,7 @@ function updateSurvivors(st: GameState, rt: Runtime, dt: number): void {
         engaged = true;
         s.facing = Math.atan2(target.y - s.y, target.x - s.x);
         if (s.cd <= 0) {
-          damageZombie(st, rt, target, GUNS[0].dmg * rt.rng.range(0.8, 1.2), s);
+          damageZombie(st, rt, target, GUNS[0].dmg * (s.role === 'soldier' ? 1.25 : 1) * rt.rng.range(0.8, 1.2), s);
           s.cd = GUNS[0].cd;
           sfx(rt, 'melee', s.x, s.y);
         }
@@ -769,10 +1028,10 @@ function updateSurvivors(st: GameState, rt: Runtime, dt: number): void {
         s.path = rt.nav.findPath(s.x, s.y, s.post.x, s.post.y);
         if (!s.path) s.post = null;
       }
-      moveAlong(rt, s, 34, dt);
+      moveAlong(rt, s, 34 * (s.role === 'scout' ? 1.3 : 1), dt);
       if (!s.path && s.post) s.facing = Math.atan2(s.y - (h.y + h.h / 2), s.x - (h.x + h.w / 2));
     } else {
-      moveAlong(rt, s, 44, dt);
+      moveAlong(rt, s, 44 * (s.role === 'scout' ? 1.3 : 1), dt);
     }
   }
   // light separation so units don't stack
@@ -893,7 +1152,7 @@ function flowStep(rt: Runtime, z: Zombie): Vec | null {
 
 function updateZombies(st: GameState, rt: Runtime, dt: number): void {
   const night = isNight(st.time);
-  const perception = night ? 125 : 85;
+  const perception = (night ? 125 : 85) * weatherOf(st).perception;
   const think = rt.thinkTimer <= 0;
   for (const z of st.zombies) {
     if (z.hp <= 0) continue;
@@ -1078,14 +1337,101 @@ function updateStructures(st: GameState, rt: Runtime, dt: number): void {
     if (rt.workshopTimer > 18) {
       rt.workshopTimer = 0;
       const n = st.structures.filter((s) => s.kind === 'workshop').length;
+      const eng = Math.min(2, st.survivors.filter((s) => s.squad === -1 && !s.joining && s.role === 'engineer').length);
       for (let i = 0; i < n; i++) {
         if (st.res.mat >= 2) {
           st.res.mat -= 2;
-          st.res.ammo += 5;
+          st.res.ammo += 5 + eng * 2;
         }
       }
     }
   }
+}
+
+// ---- vehicles ------------------------------------------------------------------
+
+function updateVehicles(st: GameState, rt: Runtime, dt: number): void {
+  for (const v of st.vehicles) {
+    if (v.wreck) continue;
+    v.ram -= dt;
+    const riders = st.survivors.filter((s) => s.inside === VEH_SEAT + v.id);
+    if (!v.path || !v.path.length) {
+      v.path = null;
+      for (const r of riders) {
+        r.x = v.x;
+        r.y = v.y;
+      }
+      continue;
+    }
+    const K = VEHICLES[v.kind];
+    const t = v.path[0];
+    const dx = t.x - v.x;
+    const dy = t.y - v.y;
+    const d = Math.hypot(dx, dy);
+    const want = Math.atan2(dy, dx);
+    let da = want - v.a;
+    while (da > Math.PI) da -= Math.PI * 2;
+    while (da < -Math.PI) da += Math.PI * 2;
+    v.a += da * Math.min(1, dt * 7);
+    const sharp = Math.abs(da) > 0.9 ? 0.45 : 1;
+    const step = K.speed * sharp * dt;
+    if (d <= step + 1) {
+      v.x = t.x;
+      v.y = t.y;
+      v.path.shift();
+    } else {
+      v.x += (dx / d) * step;
+      v.y += (dy / d) * step;
+    }
+    const moved = Math.min(step, d);
+    v.odo += moved;
+    st.res.fuel = Math.max(0, st.res.fuel - (moved * K.fuelPer100) / 100);
+    for (const r of riders) {
+      r.x = v.x;
+      r.y = v.y;
+    }
+    // engine noise draws the infected
+    if (v.odo > 60) {
+      v.odo = 0;
+      noise(rt, v.x, v.y, 170 * weatherOf(st).noise);
+    }
+    // run down anything in the way
+    if (v.ram <= 0) {
+      forZombiesNear(rt, v.x + Math.cos(v.a) * 6, v.y + Math.sin(v.a) * 6, 11, (z) => {
+        if (v.ram > 0) return;
+        damageZombie(st, rt, z, z.kind === 2 ? 45 : 90, null);
+        z.x += Math.cos(v.a) * 8;
+        z.y += Math.sin(v.a) * 8;
+        v.hp -= z.kind === 2 ? 12 : 4;
+        v.ram = 0.12;
+        sfx(rt, 'crash', v.x, v.y);
+      });
+    }
+    if (v.hp <= 0) {
+      wreckVehicle(st, rt, v);
+      continue;
+    }
+    if (st.res.fuel <= 0) {
+      v.path = null;
+      toast(rt, `The ${K.name} ran out of fuel.`, 'warn');
+    }
+  }
+}
+
+function wreckVehicle(st: GameState, rt: Runtime, v: Vehicle): void {
+  if (v.squad >= 0) {
+    unloadAll(st, rt, v.squad);
+    for (const s of squadMembers(st, v.squad)) s.hp -= 15;
+    st.squads[v.squad].vehicle = -1;
+    if (st.squads[v.squad].order.drive) st.squads[v.squad].order = { t: 'idle' };
+  }
+  v.wreck = true;
+  v.squad = -1;
+  v.path = null;
+  st.fires.push({ x: v.x, y: v.y });
+  for (let i = 0; i < 18; i++) spark(rt, v.x + rt.rng.range(-8, 8), v.y + rt.rng.range(-6, 6), '#ffb060');
+  toast(rt, `The ${VEHICLES[v.kind].name} is wrecked!`, 'bad');
+  sfx(rt, 'crash', v.x, v.y);
 }
 
 // ---- time of day --------------------------------------------------------------
@@ -1173,23 +1519,35 @@ function newDay(st: GameState, rt: Runtime): void {
   if (treated) notes.push(`treated ${treated} wounded`);
   // repairs
   let repaired = 0;
+  const per = engineerAtHaven(st) ? 40 : 20;
   st.b.forEach((b, i) => {
     if (!b.owned) return;
     const max = maxHpOf(rt.map, st.b, i);
     const missing = max - b.hp;
     if (missing <= 0) return;
-    const cost = Math.ceil(missing / 20);
+    const cost = Math.ceil(missing / per);
     const pay = Math.min(cost, st.res.mat);
     st.res.mat -= pay;
-    b.hp = Math.min(max, b.hp + pay * 20);
+    b.hp = Math.min(max, b.hp + pay * per);
     repaired += pay;
   });
   if (repaired) notes.push(`repairs used ${repaired} materials`);
   // more infected drift into town
   populate(st, rt, 10 + st.day * 2, 520);
+  st.weather = rollWeather(rt);
+  if (st.weather !== 'clear') notes.push(`${WEATHER[st.weather].name.toLowerCase()} today`);
   rt.events.push({ k: 'banner', title: `Day ${st.day}`, sub: `You survived the night. ${capitalize(notes.join(', '))}.`, tone: 'good' });
   sfx(rt, 'dawn', 0, 0);
   rt.events.push({ k: 'save' });
+}
+
+function rollWeather(rt: Runtime): Weather {
+  return rt.rng.weighted<Weather>([
+    ['clear', 45],
+    ['overcast', 25],
+    ['rain', 20],
+    ['fog', 10],
+  ]);
 }
 
 function capitalize(s: string): string {
@@ -1202,6 +1560,13 @@ function updateTime(st: GameState, rt: Runtime, dt: number): void {
   const h = hourOf(st.time);
   const crossed = (at: number) => (prev < at && h >= at) || (prev > h && (at > prev || at <= h));
   if (crossed(17.5)) toast(rt, 'Dusk is coming. Get your squads back to the haven.', 'warn');
+  if (crossed(13) && rt.rng.chance(0.3)) {
+    const w = rollWeather(rt);
+    if (w !== st.weather) {
+      st.weather = w;
+      toast(rt, w === 'rain' ? 'It starts to rain. Gunfire carries less, but you see less too.' : w === 'fog' ? 'Fog rolls in. Visibility is poor.' : w === 'clear' ? 'The sky clears.' : 'Clouds gather over the town.', 'info');
+    }
+  }
   if (crossed(20)) startNight(st, rt);
   if (crossed(5)) dawn(st);
   if (crossed(6)) newDay(st, rt);
@@ -1219,7 +1584,9 @@ export interface Viewer {
 export function viewers(st: GameState, rt: Runtime): Viewer[] {
   const night = isNight(st.time);
   const out: Viewer[] = [];
-  for (const s of st.survivors) if (s.inside < 0) out.push({ x: s.x, y: s.y, r: night ? 105 : 150 });
+  const wv = weatherOf(st).vision;
+  for (const s of st.survivors) if (s.inside < 0) out.push({ x: s.x, y: s.y, r: (night ? 105 : 150) * wv * (s.role === 'scout' ? 1.35 : 1) });
+  for (const v of st.vehicles) if (v.squad >= 0 && st.survivors.some((s) => s.inside === VEH_SEAT + v.id)) out.push({ x: v.x, y: v.y, r: (night ? 130 : 160) * wv });
   st.b.forEach((b, i) => {
     if (!b.owned) return;
     const d = rt.map.buildings[i];
@@ -1299,6 +1666,7 @@ export function step(st: GameState, rt: Runtime, dt: number): void {
   rebuildZGrid(st, rt);
   rt.thinkTimer -= dt;
   updateSquads(st, rt, dt);
+  updateVehicles(st, rt, dt);
   updateSurvivors(st, rt, dt);
   updateZombies(st, rt, dt);
   updateStructures(st, rt, dt);
@@ -1309,7 +1677,16 @@ export function step(st: GameState, rt: Runtime, dt: number): void {
   const infirm = st.structures.some((s) => s.kind === 'infirmary');
   for (const s of st.survivors) {
     if (s.hp >= s.maxHp) continue;
-    if (s.inside >= 0 || distToBase(st, rt, s.x, s.y) < 60) s.hp = Math.min(s.maxHp, s.hp + dt * (infirm ? 2.5 : 0.5));
+    if ((s.inside >= 0 && !aboard(s)) || distToBase(st, rt, s.x, s.y) < 60) s.hp = Math.min(s.maxHp, s.hp + dt * (infirm ? 2.5 : 0.5));
+  }
+  // medics patch up anyone close by
+  for (const m of st.survivors) {
+    if (m.role !== 'medic' || m.hp <= 0) continue;
+    for (const s of st.survivors) {
+      if (s.hp >= s.maxHp || s.hp <= 0) continue;
+      const near = (m.inside >= 0 && s.inside === m.inside) || (m.inside < 0 && s.inside < 0 && dist2(m.x, m.y, s.x, s.y) < 45 * 45);
+      if (near) s.hp = Math.min(s.maxHp, s.hp + dt * (s === m ? 0.6 : 1.2));
+    }
   }
 
   rt.visTimer -= dt;

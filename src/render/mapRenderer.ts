@@ -2,6 +2,7 @@ import type { Area, BuildingDef, Fence, MapData, Prop, Road } from '../world/typ
 import { buildTextures, makeCanvas, worldPattern, type Textures } from './textures';
 import { hash2 } from '../core/rng';
 import { clamp, mixHex, shade, type Rect } from '../core/math';
+import { vehicleSpots } from '../world/mapgen';
 
 const SIDEWALK = 8;
 const IDX = 200; // spatial index bucket size in world units
@@ -87,10 +88,11 @@ interface Tile {
 }
 
 const HAS_FILTER = typeof CanvasRenderingContext2D !== 'undefined' && 'filter' in CanvasRenderingContext2D.prototype;
+let BLUR = HAS_FILTER;
 
 /** Runs `fn` with a blur filter (device px) if the platform supports canvas filters. */
 function blurred(g: CanvasRenderingContext2D, px: number, fn: () => void): void {
-  if (HAS_FILTER && px >= 0.35) {
+  if (BLUR && px >= 0.35) {
     g.filter = `blur(${px.toFixed(2)}px)`;
     fn();
     g.filter = 'none';
@@ -121,7 +123,9 @@ export class MapRenderer {
     this.tex = buildTextures(map.seed, map.width, map.height);
     this.scratch = makeCanvas(TILE + PAD * 2, TILE + PAD * 2);
     this.areas = [...map.areas].sort((a, b) => (AREA_ORDER[a.kind] ?? 0) - (AREA_ORDER[b.kind] ?? 0));
-    this.props = map.props;
+    // drivable vehicles are drawn by the world renderer, not baked into tiles
+    const dynamic = new Set(vehicleSpots(map));
+    this.props = map.props.filter((_, i) => !dynamic.has(i));
     this.fences = map.fences;
     this.buildings = [...map.buildings].sort((a, b) => a.y + a.h - (b.y + b.h));
     const pad = (r: Rect, p: number, sx = 0, sy = 0): Rect => ({ x: r.x - p, y: r.y - p, w: r.w + p * 2 + sx, h: r.h + p * 2 + sy });
@@ -180,6 +184,15 @@ export class MapRenderer {
       maxX = Math.max(maxX, p.x);
     }
     this.riverBounds = { x: minX - rv.w, y: -100, w: maxX - minX + rv.w * 2, h: map.height + 200 };
+  }
+
+  /** Soft shadows on/off (battery saver). Clears the tile cache when it changes. */
+  setBlur(on: boolean): void {
+    const v = on && HAS_FILTER;
+    if (v === BLUR) return;
+    BLUR = v;
+    this.tiles.clear();
+    this.warmup();
   }
 
   /** Pre-render the coarsest level so there is always a fallback to show. */

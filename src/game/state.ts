@@ -1,6 +1,7 @@
 import { Rng } from '../core/rng';
 import type { Vec } from '../core/math';
 import type { Loot, MapData } from '../world/types';
+import { vehicleSpots } from '../world/mapgen';
 
 // ---- tunables ----------------------------------------------------------------
 export const DAY_LEN = 240; // seconds of game time per full day at 1x
@@ -37,6 +38,53 @@ export const STRUCTS: Record<StructKind, { name: string; cost: number; hp: numbe
 
 export const FORT_COST = [15, 30, 50];
 
+// ---- survivor roles ------------------------------------------------------------
+export type Role = 'soldier' | 'scout' | 'medic' | 'engineer' | 'scavenger';
+export const ROLE_LIST: Role[] = ['soldier', 'scout', 'medic', 'engineer', 'scavenger'];
+export const ROLES: Record<Role, { name: string; desc: string }> = {
+  soldier: { name: 'Soldier', desc: 'Hits harder, aims better and takes more punishment.' },
+  scout: { name: 'Scout', desc: 'Moves faster, sees further and scouts buildings quickly.' },
+  medic: { name: 'Medic', desc: 'Patches up nearby survivors over time.' },
+  engineer: { name: 'Engineer', desc: 'At the haven: cheaper building and barricades, better repairs and workshops.' },
+  scavenger: { name: 'Scavenger', desc: 'Their squad scavenges faster and finds extra supplies.' },
+};
+
+// ---- vehicles ---------------------------------------------------------------------
+export type VehKind = 'car' | 'cruiser' | 'van';
+export const VEHICLES: Record<VehKind, { name: string; speed: number; hp: number; fuelPer100: number; repair: number; prop: 'car' | 'police' | 'truck' }> = {
+  car: { name: 'Sedan', speed: 115, hp: 90, fuelPer100: 0.35, repair: 12, prop: 'car' },
+  cruiser: { name: 'Police Cruiser', speed: 135, hp: 120, fuelPer100: 0.5, repair: 18, prop: 'police' },
+  van: { name: 'Delivery Van', speed: 95, hp: 170, fuelPer100: 0.55, repair: 20, prop: 'truck' },
+};
+
+/** Survivors riding in vehicle `v` have inside = VEH_SEAT + v (hidden, like being in a building). */
+export const VEH_SEAT = 100000;
+
+export interface Vehicle {
+  id: number;
+  kind: VehKind;
+  x: number;
+  y: number;
+  a: number;
+  hp: number;
+  broken: boolean;
+  wreck: boolean;
+  squad: number;
+  path: Vec[] | null;
+  color: string;
+  odo: number;
+  ram: number;
+}
+
+// ---- weather ------------------------------------------------------------------------
+export type Weather = 'clear' | 'overcast' | 'rain' | 'fog';
+export const WEATHER: Record<Weather, { name: string; vision: number; perception: number; noise: number; dark: number }> = {
+  clear: { name: 'Clear', vision: 1, perception: 1, noise: 1, dark: 0 },
+  overcast: { name: 'Overcast', vision: 0.95, perception: 1, noise: 1, dark: 0.08 },
+  rain: { name: 'Rain', vision: 0.75, perception: 0.8, noise: 0.6, dark: 0.14 },
+  fog: { name: 'Fog', vision: 0.6, perception: 0.7, noise: 0.85, dark: 0.06 },
+};
+
 // ---- entity types ------------------------------------------------------------
 export interface Survivor {
   id: number;
@@ -51,7 +99,8 @@ export interface Survivor {
   path: Vec[] | null;
   goal: Vec | null;
   cd: number;
-  inside: number; // building id when inside, else -1
+  inside: number; // building id when inside, VEH_SEAT + id when riding, else -1
+  role: Role;
   post: Vec | null; // guard post for haven guards
   kills: number;
   anim: number;
@@ -80,12 +129,16 @@ export interface Zombie {
   vy: number;
 }
 
-export type OrderType = 'idle' | 'move' | 'scout' | 'scavenge' | 'claim' | 'return';
+export type OrderType = 'idle' | 'move' | 'scout' | 'scavenge' | 'claim' | 'return' | 'vehicle';
 export interface Order {
   t: OrderType;
   x?: number;
   y?: number;
   b?: number;
+  /** vehicle id for 'vehicle' orders */
+  v?: number;
+  /** driving stage when the squad uses its vehicle for this order */
+  drive?: 'board' | 'drive';
   /** progress phase for building orders */
   phase?: 'go' | 'clear' | 'inside' | 'done';
   timer?: number;
@@ -95,6 +148,7 @@ export interface Order {
 export interface Squad {
   id: number;
   order: Order;
+  vehicle: number; // vehicle id or -1
 }
 
 export interface BState {
@@ -123,6 +177,7 @@ export interface Resources {
   mat: number;
   ammo: number;
   med: number;
+  fuel: number;
 }
 
 export interface Stats {
@@ -158,6 +213,8 @@ export interface GameState {
   lastHour: number;
   alerts: Record<string, number>;
   fires: Vec[];
+  vehicles: Vehicle[];
+  weather: Weather;
 }
 
 const NAMES = [
@@ -202,7 +259,7 @@ export function newGame(map: MapData, seed: number): GameState {
     owned: false,
     fort: 0,
     hp: d.baseHp,
-    loot: { ...d.loot },
+    loot: { ...d.loot, fuel: fuelFor(d.kind, rng) },
     infected: d.infected,
     survivors: d.survivors,
   }));
@@ -217,13 +274,13 @@ export function newGame(map: MapData, seed: number): GameState {
     time: DAY_LEN * (1.5 / 24), // 07:30
     day: 1,
     speed: 1,
-    res: { food: 18, mat: 30, ammo: 120, med: 2 },
+    res: { food: 18, mat: 30, ammo: 120, med: 2, fuel: 10 },
     survivors: [],
     zombies: [],
     squads: [
-      { id: 0, order: { t: 'idle' } },
-      { id: 1, order: { t: 'idle' } },
-      { id: 2, order: { t: 'idle' } },
+      { id: 0, order: { t: 'idle' }, vehicle: -1 },
+      { id: 1, order: { t: 'idle' }, vehicle: -1 },
+      { id: 2, order: { t: 'idle' }, vehicle: -1 },
     ],
     b,
     structures: [],
@@ -240,10 +297,12 @@ export function newGame(map: MapData, seed: number): GameState {
     lastHour: 7,
     alerts: {},
     fires: [],
+    vehicles: [],
+    weather: 'clear',
   };
   const used = new Set<string>();
   const door = hq.door;
-  const mk = (squad: number, gun: Gun, i: number): Survivor => ({
+  const mk = (squad: number, gun: Gun, i: number, role: Role): Survivor => ({
     id: st.nextId++,
     name: nameFor(rng, used),
     x: door.x + ((i % 3) - 1) * 10,
@@ -257,15 +316,18 @@ export function newGame(map: MapData, seed: number): GameState {
     goal: null,
     cd: 0,
     inside: -1,
+    role,
     post: null,
     kills: 0,
     anim: rng.next() * 10,
     repath: 0,
   });
   let i = 0;
-  st.survivors.push(mk(0, 1, i++), mk(0, 1, i++), mk(0, 0, i++));
-  st.survivors.push(mk(1, 1, i++), mk(1, 0, i++));
-  st.survivors.push(mk(-1, 1, i++), mk(-1, 0, i++));
+  st.survivors.push(mk(0, 1, i++, 'soldier'), mk(0, 1, i++, 'scavenger'), mk(0, 0, i++, 'medic'));
+  st.survivors.push(mk(1, 1, i++, 'scout'), mk(1, 0, i++, 'engineer'));
+  st.survivors.push(mk(-1, 1, i++, 'soldier'), mk(-1, 0, i++, 'engineer'));
+  for (const s of st.survivors) if (s.role === 'soldier') s.hp = s.maxHp = 120;
+  st.vehicles = createVehicles(map, () => st.nextId++);
 
   // Burning wrecks that flicker at night.
   const burnt = map.props.filter((p) => p.kind === 'car' && p.c === '#2a2522');
@@ -284,4 +346,47 @@ export function capacity(map: MapData, st: GameState): number {
     if (s.owned) c += map.buildings[i].capacity;
   });
   return c;
+}
+
+const FUEL: Partial<Record<string, [number, number, number]>> = {
+  gas: [14, 24, 1],
+  farmhouse: [4, 8, 0.6],
+  barn: [4, 8, 0.6],
+  warehouse: [3, 6, 0.4],
+  police: [3, 6, 0.5],
+  factory: [4, 8, 0.5],
+  hardware: [2, 4, 0.4],
+  house: [1, 2, 0.1],
+};
+
+function fuelFor(kind: string, rng: Rng): number {
+  const f = FUEL[kind];
+  return f && rng.chance(f[2]) ? rng.int(f[0], f[1]) : 0;
+}
+
+export function createVehicles(map: MapData, nextId: () => number): Vehicle[] {
+  const out: Vehicle[] = vehicleSpots(map).map((pi) => {
+    const p = map.props[pi];
+    const kind: VehKind = p.kind === 'police' ? 'cruiser' : p.kind === 'truck' ? 'van' : 'car';
+    return { id: nextId(), kind, x: p.x, y: p.y, a: p.a, hp: VEHICLES[kind].hp, broken: true, wreck: false, squad: -1, path: null, color: p.c || '#55575a', odo: 0, ram: 0 };
+  });
+  // one sedan near the haven still runs
+  const ready = out.find((v) => v.kind === 'car');
+  if (ready) ready.broken = false;
+  return out;
+}
+
+export function roleFor(id: number): Role {
+  return ROLE_LIST[id % ROLE_LIST.length];
+}
+
+/** Brings saves from older versions up to date. */
+export function migrate(st: GameState, map: MapData): GameState {
+  st.res.fuel ??= 0;
+  st.weather ??= 'clear';
+  for (const sq of st.squads) sq.vehicle ??= -1;
+  for (const b of st.b) b.loot.fuel ??= 0;
+  for (const s of st.survivors) s.role ??= roleFor(s.id);
+  if (!st.vehicles) st.vehicles = createVehicles(map, () => st.nextId++);
+  return st;
 }

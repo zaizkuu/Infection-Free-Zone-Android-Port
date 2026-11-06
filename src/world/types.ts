@@ -30,10 +30,11 @@ export interface Loot {
   ammo: number;
   med: number;
   guns: number;
+  fuel: number;
 }
 
-export const emptyLoot = (): Loot => ({ food: 0, mat: 0, ammo: 0, med: 0, guns: 0 });
-export const lootTotal = (l: Loot) => l.food + l.mat + l.ammo + l.med + l.guns;
+export const emptyLoot = (): Loot => ({ food: 0, mat: 0, ammo: 0, med: 0, guns: 0, fuel: 0 });
+export const lootTotal = (l: Loot) => l.food + l.mat + l.ammo + l.med + l.guns + (l.fuel || 0);
 
 /** Static (generated) building definition. Dynamic state lives in the game state. */
 export interface BuildingDef extends Rect {
